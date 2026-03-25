@@ -2,6 +2,7 @@
 # syncRedmine 卸载脚本
 
 INSTALL_DIR="$HOME/.local/share/syncRedmine"
+LOG_DIR="$INSTALL_DIR/logs"
 DESKTOP_FILE="$HOME/.config/autostart/syncRedmine.desktop"
 CONFIG_FILE="$HOME/.commit_tool/sync_config.json"
 
@@ -18,8 +19,11 @@ pkill -f "syncRedmine.py" 2>/dev/null && echo "      进程已停止" || echo " 
 echo "[2/3] 删除程序文件..."
 
 if [ -d "$INSTALL_DIR" ]; then
+    if [ -d "$LOG_DIR" ]; then
+        echo "      检测到运行日志目录: $LOG_DIR"
+    fi
     rm -rf "$INSTALL_DIR"
-    echo "      已删除: $INSTALL_DIR"
+    echo "      已删除: $INSTALL_DIR (包含运行日志目录)"
 else
     echo "      未找到: $INSTALL_DIR (跳过)"
 fi
