@@ -28,7 +28,7 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QGroupBox, QFormLayout, QMessageBox,
-    QFrame, QSystemTrayIcon, QMenu,
+    QFrame, QSystemTrayIcon, QMenu, QComboBox,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QFileSystemWatcher
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor
@@ -371,11 +371,13 @@ class SyncWorker(QThread):
     log_sig      = pyqtSignal(str)
     finished_sig = pyqtSignal(bool, str)
 
-    def __init__(self, config, fields, gerrit_url):
+    def __init__(self, config, fields, gerrit_url, hours=0.5, status_name='OnGoing'):
         super().__init__()
-        self.config     = config
-        self.fields     = fields
-        self.gerrit_url = gerrit_url
+        self.config      = config
+        self.fields      = fields
+        self.gerrit_url  = gerrit_url
+        self.hours       = hours
+        self.status_name = status_name
         self.auth       = (config['redmine_username'], config['redmine_password'])
         self.base       = config['redmine_url'].rstrip('/')
 
@@ -410,12 +412,12 @@ class SyncWorker(QThread):
             uid  = r2.json()['user']['id'] if r2.status_code == 200 else None
 
             self.log_sig.emit("获取状态列表...")
-            r3       = self._get('/issue_statuses.json')
-            fixed_id = None
+            r3 = self._get('/issue_statuses.json')
+            target_status_id = None
             if r3.status_code == 200:
                 for s in r3.json().get('issue_statuses', []):
-                    if s['name'].lower() == 'fixed':
-                        fixed_id = s['id']
+                    if s['name'].lower() == self.status_name.lower():
+                        target_status_id = s['id']
                         break
 
             # 组装自定义字段
@@ -426,25 +428,55 @@ class SyncWorker(QThread):
                 val = self.fields.get(log_key, '').strip() or PLACEHOLDER
                 if rf_name in cf_map:
                     cfs.append({'id': cf_map[rf_name], 'value': val})
+            # 解决者 —— 优先自定义字段，其次 assigned_to_id
             solver_field_id = cf_map.get(SOLVER_FIELD_NAME)
             if uid and solver_field_id:
                 cfs.append({'id': solver_field_id, 'value': str(uid)})
-            elif uid and SOLVER_FIELD_NAME not in cf_map:
-                self.log_sig.emit(f"提示：未找到自定义字段“{SOLVER_FIELD_NAME}”，已跳过")
+                self.log_sig.emit("solver -> custom_field (uid=%s)" % uid)
+            elif uid:
+                self.log_sig.emit("solver -> assigned_to_id (uid=%s)" % uid)
+
+            # 工时 —— 优先查找名称含"工时"的自定义字段
+            hours_field_id = None
+            for name, fid in cf_map.items():
+                if '工时' in name:
+                    hours_field_id = fid
+                    break
+            if hours_field_id:
+                cfs.append({'id': hours_field_id, 'value': str(self.hours)})
 
             update = {'done_ratio': 100}
-            if fixed_id:
-                update['status_id'] = fixed_id
+            if target_status_id:
+                update['status_id'] = target_status_id
+            # 若解决者不在自定义字段，走 assigned_to_id
+            if uid and not solver_field_id:
+                update['assigned_to_id'] = uid
             if cfs:
                 update['custom_fields'] = cfs
 
             self.log_sig.emit(f"提交更新 issue #{issue_id}...")
             r4 = self._put(f'/issues/{issue_id}.json', {'issue': update})
             if r4.status_code in (200, 204):
-                self.finished_sig.emit(True, f"issue #{issue_id} 同步成功！")
+                msg = f"issue #{issue_id} 同步成功！"
             else:
                 self.finished_sig.emit(False,
                     f"更新失败: HTTP {r4.status_code}\n{r4.text[:300]}")
+                return
+
+            # 工时 —— 若无自定义字段，则创建 time_entry
+            if not hours_field_id and self.hours > 0:
+                self.log_sig.emit(f"记录工时 {self.hours} 小时...")
+                te = {'time_entry': {'issue_id': issue_id, 'hours': self.hours}}
+                r5 = requests.post(f'{self.base}/time_entries.json',
+                                   auth=self.auth,
+                                   headers={'Content-Type': 'application/json'},
+                                   data=json.dumps(te), timeout=10)
+                if r5.status_code in (200, 201):
+                    msg += f"  工时 {self.hours}h 已记录"
+                else:
+                    msg += f"  (工时记录失败: HTTP {r5.status_code})"
+
+            self.finished_sig.emit(True, msg)
         except Exception as e:
             self.finished_sig.emit(False, str(e))
 
@@ -628,8 +660,49 @@ class SyncDialog(QDialog):
         fl.addRow(QLabel('<b style="color:#555;">Gerrit:</b>'), url_lbl)
         root.addWidget(card)
 
+        # ── 用户可编辑字段 ─────────────────────────────────────────────────
+        INPUT_STYLE = ("QLineEdit{border:1px solid #ccc;border-radius:4px;"
+                       "padding:4px 6px;font-size:10pt;}"
+                       "QLineEdit:focus{border:1.5px solid #4a90d9;}")
+        edit_card = QGroupBox("请确认 / 填写以下信息")
+        edit_card.setStyleSheet(self.CARD_STYLE)
+        ef = QFormLayout(edit_card)
+        ef.setSpacing(7)
+        ef.setContentsMargins(14, 10, 14, 12)
+
+        self.edit_comment = QLineEdit(self.fields.get('Comment', '').strip())
+        self.edit_comment.setPlaceholderText('请填写查找问题的思路（留空默认"请填写"）')
+        self.edit_comment.setFixedHeight(34)
+        self.edit_comment.setStyleSheet(INPUT_STYLE)
+        k1 = QLabel("【查找问题的思路】:")
+        k1.setStyleSheet("color:#555; font-weight:bold;")
+        ef.addRow(k1, self.edit_comment)
+
+        self.edit_hours = QLineEdit("0.5")
+        self.edit_hours.setPlaceholderText('0.5')
+        self.edit_hours.setFixedHeight(34)
+        self.edit_hours.setStyleSheet(INPUT_STYLE)
+        k2 = QLabel('<b style="color:#555;">工时（小时）</b>'
+                     '<span style="color:red;"> *</span>')
+        k2.setTextFormat(Qt.RichText)
+        ef.addRow(k2, self.edit_hours)
+
+        COMBO_STYLE = ("QComboBox{border:1px solid #ccc;border-radius:4px;"
+                       "padding:4px 6px;font-size:10pt;}"
+                       "QComboBox:focus{border:1.5px solid #4a90d9;}")
+        self.combo_status = QComboBox()
+        self.combo_status.addItems(["OnGoing", "Fixed"])
+        self.combo_status.setCurrentIndex(0)
+        self.combo_status.setFixedHeight(34)
+        self.combo_status.setStyleSheet(COMBO_STYLE)
+        k3 = QLabel("状态:")
+        k3.setStyleSheet("color:#555; font-weight:bold;")
+        ef.addRow(k3, self.combo_status)
+
+        root.addWidget(edit_card)
+
         # ── 将更新字段说明 ────────────────────────────────────────────────────
-        tags = ["状态→Fixed", "完成度→100%", "解决者", "修复情况",
+        tags = ["状态", "完成度→100%", "解决者", "修复情况",
                 "问题根源", "修复方案", "自测情况", "建议", "查找问题的思路"]
         tag_html = " ".join(
             f'<span style="background:#e3f2fd;color:#1565c0;border-radius:3px;'
@@ -686,7 +759,21 @@ class SyncDialog(QDialog):
         self.btn_yes.setEnabled(False)
         self.btn_no.setEnabled(False)
         self._set_status("同步中...", "#2196F3")
-        self.worker = SyncWorker(self.config, self.fields, self.gerrit_url)
+
+        # 读取用户手动编辑的值
+        comment_val = self.edit_comment.text().strip() or PLACEHOLDER
+        self.fields['Comment'] = comment_val
+
+        hours_text = self.edit_hours.text().strip()
+        try:
+            hours = float(hours_text) if hours_text else 0.5
+        except ValueError:
+            hours = 0.5
+
+        status_name = self.combo_status.currentText()
+
+        self.worker = SyncWorker(self.config, self.fields, self.gerrit_url,
+                                 hours=hours, status_name=status_name)
         self.worker.log_sig.connect(lambda m: self._set_status(m, "#2196F3"))
         self.worker.finished_sig.connect(self._on_done)
         self.worker.start()

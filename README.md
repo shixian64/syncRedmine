@@ -29,9 +29,10 @@ commit 工具 ──→ 写入 ~/commit_data.log ──→ git push
 | Solution | 【修复方案】 | |
 | Test_Report | 【自测情况】 | |
 | Test_Suggestion | 【建议】 | |
-| Comment | 【查找问题的思路】 | 如为空则填写"请填写" |
-| *(Redmine 登录用户)* | 解决者 | 按 Redmine 字段名动态查找，不再依赖固定字段 ID |
-| *(固定值)* | 状态 → Fixed | |
+| Comment | 【查找问题的思路】 | 如为空则填写"请填写"，同步前可手动修改 |
+| *(同步弹窗输入)* | 工时 | 优先写入名称包含“工时”的自定义字段，否则写入 `time_entries` |
+| *(Redmine 登录用户)* | 解决者 | 优先按字段名动态查找；无自定义字段时回退到 `assigned_to_id` |
+| *(同步弹窗选择)* | 状态 | 支持 `OnGoing` / `Fixed` |
 | *(固定值)* | 完成度 → 100% | |
 
 ## 安装
@@ -73,8 +74,9 @@ chmod +x install.sh
 
 1. 正常使用 commit 工具提交代码
 2. push 完成后 syncRedmine 自动弹出确认框
-3. 确认信息无误后点击 **「是，立即同步」**
-4. 同步结果即时显示
+3. 在弹窗中确认或补充 **查找问题的思路 / 工时 / 状态**
+4. 点击 **「是，立即同步」**
+5. 同步结果即时显示
 
 ### 托盘图标状态
 
@@ -116,6 +118,7 @@ chmod +x uninstall.sh
 
 ```
 syncRedmine/
+├── .gitignore         # Git 忽略规则
 ├── syncRedmine.py     # 主程序
 ├── requirements.txt   # Python 依赖
 ├── install.sh         # 安装脚本
