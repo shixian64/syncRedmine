@@ -6,8 +6,8 @@ syncRedmine - 独立后台程序
 
 检测原理:
   1. 监控 ~/commit_data.log 变化 (commit 工具写入此文件)
-  2. 立即记录 Gerrit 上该 topic 的 change 快照
-  3. 轮询 Gerrit REST API, 发现新 change 或 patchset 更新 → push 完成
+  2. 用 Bug number / Topic ID 记录 Gerrit 上关联 topic 的 change 基线
+  3. 轮询 Gerrit REST API, 发现新 change / patchset 更新 / 最近更新时间命中 → push 完成
   4. 弹出同步确认框
 
 启动: python3 syncRedmine.py
@@ -15,6 +15,8 @@ syncRedmine - 独立后台程序
 """
 
 import sys, os, re, json, base64, time
+import urllib.request, urllib.parse, urllib.error
+from datetime import datetime, timedelta, timezone
 
 try:
     import requests
@@ -40,6 +42,7 @@ DEFAULT_LOG     = os.path.join(os.path.expanduser('~'), 'commit_data.log')
 PLACEHOLDER     = '请填写'
 POLL_INTERVAL   = 4          # 轮询间隔 (秒)
 POLL_TIMEOUT    = 180        # 最长等待 push 时间 (秒)
+RECENT_PUSH_SLACK = 8        # Gerrit 时间与本机时间允许偏差 (秒)
 
 # commit_data.log 字段 → Redmine 自定义字段名
 FIELD_MAP = {
@@ -49,6 +52,8 @@ FIELD_MAP = {
     'Test_Suggestion': '【建议】',
     'Comment':         '【查找问题的思路】',
 }
+FIX_FIELD_NAME    = '【修复情况】'
+SOLVER_FIELD_NAME = '解决者'
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -86,11 +91,154 @@ def parse_commit_log(path=DEFAULT_LOG):
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
     fields = {}
-    for key in ['Bug number', 'Author', 'Root Cause', 'Solution',
+    for key in ['Bug number', 'Topic ID', 'Author', 'Root Cause', 'Solution',
                 'Test_Report', 'Test_Suggestion', 'Comment']:
         m = re.search(rf'^{re.escape(key)}:(.+)$', content, re.MULTILINE)
         fields[key] = m.group(1).strip() if m else ''
     return fields
+
+
+def extract_first_number(text):
+    m = re.search(r'\d+', text or '')
+    return m.group() if m else ''
+
+
+def normalize_topic_id(topic):
+    """与 commit_tool/config.sh 中 push topic 的处理保持一致。"""
+    topic = (topic or '').strip()
+    if 'revert' in topic.lower():
+        topic = topic[8:].strip() if len(topic) > 8 else ''
+    return topic
+
+
+def get_gerrit_topics(fields):
+    """优先按 Bug number 关联，同时兼容 Topic ID。"""
+    topics = []
+    bug_number = extract_first_number(fields.get('Bug number', ''))
+    topic_id = normalize_topic_id(fields.get('Topic ID', ''))
+    if bug_number:
+        topics.append(bug_number)
+    if topic_id and topic_id not in topics:
+        topics.append(topic_id)
+    return topics
+
+
+def parse_gerrit_time(value):
+    """解析 Gerrit updated 时间，按 UTC 处理。"""
+    value = (value or '').strip()
+    if not value:
+        return None
+    try:
+        if '.' in value:
+            prefix, frac = value.split('.', 1)
+            frac = re.sub(r'\D', '', frac)
+            value = f"{prefix}.{frac[:6].ljust(6, '0')}"
+            dt = datetime.strptime(value, '%Y-%m-%d %H:%M:%S.%f')
+        else:
+            dt = datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+        return dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _decode_gerrit_json(text):
+    """去掉 Gerrit JSON 防护前缀 )]}'"""
+    if text.startswith(")]}'"):
+        text = text[text.index("\n") + 1:]
+    return json.loads(text.strip())
+
+
+# ── Gerrit Cookie 认证 ────────────────────────────────────────────────────────
+GERRIT_COOKIE_CACHE = "/tmp/.syncredmine_gerrit_cookie"
+
+def _gerrit_login(base, username, password):
+    """表单 POST 登录获取 GerritAccount cookie（与 gerrit_api.py 同机制）"""
+    # 先检查缓存
+    if os.path.exists(GERRIT_COOKIE_CACHE):
+        try:
+            with open(GERRIT_COOKIE_CACHE) as f:
+                cache = json.load(f)
+            if (cache.get("base_url") == base
+                    and time.time() - cache.get("time", 0) < 7200):
+                return cache["cookie"]
+        except Exception:
+            pass
+
+    login_url = f"{base}/login/%2F"
+    data = urllib.parse.urlencode({"username": username, "password": password}).encode()
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+    try:
+        opener.open(urllib.request.Request(login_url, data=data), timeout=15)
+    except urllib.error.HTTPError as e:
+        cookie_hdr = e.headers.get("Set-Cookie", "")
+        m = re.search(r"GerritAccount=([^;]+)", cookie_hdr)
+        if m:
+            cookie = m.group(1)
+            try:
+                with open(GERRIT_COOKIE_CACHE, "w") as f:
+                    json.dump({"base_url": base, "cookie": cookie, "time": time.time()}, f)
+                os.chmod(GERRIT_COOKIE_CACHE, 0o600)
+            except Exception:
+                pass
+            return cookie
+    raise RuntimeError("Gerrit 登录失败：未获取到 cookie")
+
+
+def _gerrit_api_get(base, cookie, path, params=None):
+    """用 cookie 调用 Gerrit REST API"""
+    url = f"{base}/{path.lstrip('/')}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params, doseq=True)
+    req = urllib.request.Request(url)
+    req.add_header("Cookie", f"GerritAccount={cookie}")
+    req.add_header("Accept", "application/json")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return _decode_gerrit_json(resp.read().decode("utf-8"))
+
+
+def fetch_gerrit_changes(config, topics, timeout=10):
+    """查询一个或多个 topic 下的 changes（Cookie 认证）。"""
+    base = config['gerrit_url'].rstrip('/')
+    if isinstance(topics, str):
+        topics = [topics]
+
+    try:
+        cookie = _gerrit_login(base, config['gerrit_username'], config['gerrit_password'])
+    except Exception as e:
+        print(f"[syncRedmine] Gerrit 登录失败: {e}")
+        return None
+
+    result = {}
+    has_success = False
+
+    for topic in topics:
+        try:
+            changes = _gerrit_api_get(base, cookie, "changes/",
+                                      {"q": f"topic:{topic}"})
+            has_success = True
+            for c in changes:
+                num = c.get('_number')
+                if num:
+                    result[num] = {
+                        'updated': c.get('updated', ''),
+                        'project': c.get('project', ''),
+                    }
+        except Exception:
+            continue
+
+    return result if has_success else None
+
+
+def build_gerrit_change_url(base, change_number, change_info=None):
+    project = (change_info or {}).get('project', '')
+    if project:
+        return f"{base}/c/{project}/+/{change_number}"
+    return f"{base}/c/+/{change_number}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -126,80 +274,91 @@ class GerritPoller(QThread):
     status_msg    = pyqtSignal(str)   # 状态提示
     timed_out     = pyqtSignal()
 
-    def __init__(self, config, topic):
+    def __init__(self, config, topics, trigger_time=None, initial_changes=None):
         super().__init__()
-        self.config    = config
-        self.topic     = topic
-        self._stop     = False
-        self._base     = config['gerrit_url'].rstrip('/')
-        self._auth     = (config['gerrit_username'], config['gerrit_password'])
+        self.config          = config
+        self.topics          = topics
+        self.trigger_time    = trigger_time
+        self.initial_changes = initial_changes
+        self._stop           = False
+        self._base           = config['gerrit_url'].rstrip('/')
 
     def cancel(self):
         self._stop = True
 
     # ── Gerrit REST API ──────────────────────────────────────────────────────
     def _get_changes(self):
-        """查询 topic 下的 changes，返回 {change_number: updated_str}"""
-        url = f"{self._base}/a/changes/?q=topic:{self.topic}"
-        try:
-            r = requests.get(url, auth=self._auth, timeout=10)
-            if r.status_code != 200:
-                return None
-            text = r.text
-            if text.startswith(")]}'"):
-                text = text[4:]
-            changes = json.loads(text.strip())
-            return {c['_number']: c.get('updated', '') for c in changes}
-        except Exception:
-            return None
+        return fetch_gerrit_changes(self.config, self.topics)
 
-    def _build_url(self, change_number):
-        """用 change_number 查询详情并构建 URL"""
-        url = f"{self._base}/a/changes/?q=change:{change_number}"
-        try:
-            r = requests.get(url, auth=self._auth, timeout=10)
-            if r.status_code == 200:
-                text = r.text
-                if text.startswith(")]}'"):
-                    text = text[4:]
-                changes = json.loads(text.strip())
-                if changes:
-                    project = changes[0].get('project', '')
-                    return f"{self._base}/c/{project}/+/{change_number}"
-        except Exception:
-            pass
-        return f"{self._base}/c/+/{change_number}"
+    def _build_url(self, change_number, change_info=None):
+        return build_gerrit_change_url(self._base, change_number, change_info)
+
+    def _find_recent_change(self, changes):
+        if not self.trigger_time:
+            return None
+        threshold = self.trigger_time - timedelta(seconds=RECENT_PUSH_SLACK)
+        candidates = []
+        for num, info in changes.items():
+            updated_at = parse_gerrit_time(info.get('updated'))
+            if updated_at and updated_at >= threshold:
+                candidates.append((updated_at, num, info))
+        if not candidates:
+            return None
+        _, num, info = max(candidates, key=lambda item: item[0])
+        return num, info
+
+    @staticmethod
+    def _detect_change(initial, current):
+        candidates = []
+        for num, info in current.items():
+            prev = initial.get(num)
+            if prev is None or info.get('updated', '') != prev.get('updated', ''):
+                updated_at = parse_gerrit_time(info.get('updated')) or datetime.min.replace(
+                    tzinfo=timezone.utc)
+                candidates.append((updated_at, num, info))
+        if not candidates:
+            return None
+        _, num, info = max(candidates, key=lambda item: item[0])
+        return num, info
 
     # ── 主轮询逻辑 ────────────────────────────────────────────────────────────
     def run(self):
-        # 立即记录 push 前的快照
         self.status_msg.emit("等待 push 完成...")
-        initial = self._get_changes() or {}
+        initial = self.initial_changes
+
+        # 若建立基线前 push 已完成，则直接识别最近更新的 change
+        if initial is not None:
+            recent = self._find_recent_change(initial)
+            if recent:
+                num, info = recent
+                self.push_detected.emit(self._build_url(num, info))
+                return
 
         elapsed = 0
         while not self._stop and elapsed < POLL_TIMEOUT:
-            time.sleep(POLL_INTERVAL)
-            elapsed += POLL_INTERVAL
-
             current = self._get_changes()
             if current is None:
-                self.status_msg.emit(f"Gerrit 连接失败，重试中 ({elapsed}s)...")
-                continue
-
-            # 检测新 change 或已有 change 被 push 更新
-            for num, updated in current.items():
-                if num not in initial:
-                    # 新 change → 第一次 push
-                    url = self._build_url(num)
-                    self.push_detected.emit(url)
+                status = "建立 Gerrit 基线失败" if initial is None else "Gerrit 连接失败"
+                self.status_msg.emit(f"{status}，重试中 ({elapsed}s)...")
+            elif initial is None:
+                # 首次成功拿到快照时，先判断 push 是否已经发生，避免竞态导致漏检
+                recent = self._find_recent_change(current)
+                if recent:
+                    num, info = recent
+                    self.push_detected.emit(self._build_url(num, info))
                     return
-                elif updated != initial[num]:
-                    # patchset 更新 → amend push
-                    url = self._build_url(num)
-                    self.push_detected.emit(url)
+                initial = current
+                self.status_msg.emit("已建立 Gerrit 基线，等待 push 完成...")
+            else:
+                detected = self._detect_change(initial, current)
+                if detected:
+                    num, info = detected
+                    self.push_detected.emit(self._build_url(num, info))
                     return
+                self.status_msg.emit(f"等待 push 完成... ({elapsed}s)")
 
-            self.status_msg.emit(f"等待 push 完成... ({elapsed}s)")
+            time.sleep(POLL_INTERVAL)
+            elapsed += POLL_INTERVAL
 
         if not self._stop:
             self.timed_out.emit()
@@ -231,11 +390,11 @@ class SyncWorker(QThread):
 
     def run(self):
         try:
-            m = re.search(r'\d+', self.fields.get('Bug number', ''))
-            if not m:
+            issue_number = extract_first_number(self.fields.get('Bug number', ''))
+            if not issue_number:
                 self.finished_sig.emit(False, f"Bug number 无效")
                 return
-            issue_id = int(m.group())
+            issue_id = int(issue_number)
 
             self.log_sig.emit(f"获取 issue #{issue_id}...")
             r = self._get(f'/issues/{issue_id}.json')
@@ -261,15 +420,17 @@ class SyncWorker(QThread):
 
             # 组装自定义字段
             cfs = []
-            fix = '【修复情况】'
-            if fix in cf_map:
-                cfs.append({'id': cf_map[fix], 'value': self.gerrit_url or PLACEHOLDER})
+            if FIX_FIELD_NAME in cf_map:
+                cfs.append({'id': cf_map[FIX_FIELD_NAME], 'value': self.gerrit_url or PLACEHOLDER})
             for log_key, rf_name in FIELD_MAP.items():
                 val = self.fields.get(log_key, '').strip() or PLACEHOLDER
                 if rf_name in cf_map:
                     cfs.append({'id': cf_map[rf_name], 'value': val})
-            if uid:
-                cfs.append({'id': 19, 'value': str(uid)})
+            solver_field_id = cf_map.get(SOLVER_FIELD_NAME)
+            if uid and solver_field_id:
+                cfs.append({'id': solver_field_id, 'value': str(uid)})
+            elif uid and SOLVER_FIELD_NAME not in cf_map:
+                self.log_sig.emit(f"提示：未找到自定义字段“{SOLVER_FIELD_NAME}”，已跳过")
 
             update = {'done_ratio': 100}
             if fixed_id:
@@ -618,16 +779,19 @@ class SyncRedmineApp:
         mtime = self._get_mtime()
         if mtime > self._last_mtime:
             self._last_mtime = mtime
-            self._on_log_changed()
+            self._on_log_changed(mtime)
 
-    def _on_log_changed(self):
+    def _on_log_changed(self, log_mtime):
         fields = parse_commit_log()
         if not fields:
             return
-        topic = fields.get('Bug number', '').strip()
-        if not re.search(r'\d+', topic):
+        issue_number = extract_first_number(fields.get('Bug number', ''))
+        if not issue_number:
             return  # NOBUG 等跳过
-        topic = re.search(r'\d+', topic).group()
+
+        topics = get_gerrit_topics(fields)
+        if not topics:
+            return
 
         if not self.config:
             return  # 未配置账号，静默跳过
@@ -636,15 +800,21 @@ class SyncRedmineApp:
         if self._poller and self._poller.isRunning():
             self._poller.cancel()
 
+        trigger_time = datetime.fromtimestamp(log_mtime, tz=timezone.utc)
+        initial_changes = fetch_gerrit_changes(self.config, topics, timeout=2)
+
         # 启动新的 Gerrit 轮询
         self.tray.setIcon(make_icon('#FF9800'))  # 橙色
         self.tray.setToolTip(self.TOOLTIP_DETECTING)
         self.tray.showMessage(
             "syncRedmine",
-            f"检测到新提交 Issue #{topic}，等待 push 到 Gerrit...",
+            f"检测到新提交 Issue #{issue_number}，等待 push 到 Gerrit...",
             QSystemTrayIcon.Information, 3000)
 
-        self._poller = GerritPoller(self.config, topic)
+        self._poller = GerritPoller(
+            self.config, topics,
+            trigger_time=trigger_time,
+            initial_changes=initial_changes)
         self._poller.push_detected.connect(
             lambda url: self._on_push_detected(fields, url))
         self._poller.status_msg.connect(
@@ -673,6 +843,7 @@ class SyncRedmineApp:
                 return
         dlg = SyncDialog(self.config, fields, gerrit_url)
         dlg.exec_()
+        self.config = dlg.config
         self.tray.setIcon(make_icon())
         self.tray.setToolTip(self.TOOLTIP_IDLE)
 

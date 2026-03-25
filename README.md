@@ -7,29 +7,30 @@
 ```
 commit 工具 ──→ 写入 ~/commit_data.log ──→ git push
                        ↑                         ↑
-              inotify 检测到文件变化      轮询 Gerrit API 检测到新 change
+              inotify 检测到文件变化  用 Bug number / Topic ID 轮询 Gerrit API
                        ↓                         ↓
-                 记录 Gerrit 快照  ──────→  弹出确认对话框
+                 记录 Gerrit 基线  ──────→  检测新 change / patchset / 最近更新时间
                                                   ↓
                                     用户点"是" → 同步到 Redmine
 ```
 
 - **零侵入**：不修改 commit 工具的任何代码
 - **inotify**：利用 Linux 内核事件监控文件变化，空闲时 CPU 零占用
-- **自动检测 push**：通过 Gerrit REST API 对比 change 快照，发现新提交或 patchset 更新即判定 push 完成
+- **自动检测 push**：优先按 `Bug number` 关联，同时兼容 `Topic ID`；通过 change 快照对比，并对“基线建立前 push 已完成”场景做最近更新时间兜底
 
 ## 同步的字段
 
 | commit_data.log 字段 | Redmine 字段 | 说明 |
 |---|---|---|
 | Bug number | issue ID | 定位 Redmine 问题 |
+| Topic ID | *(不写入 Redmine)* | 作为 Gerrit 检测补充条件 |
 | *(Gerrit API 获取)* | 【修复情况】 | Gerrit change URL |
 | Root Cause | 【问题根源】 | |
 | Solution | 【修复方案】 | |
 | Test_Report | 【自测情况】 | |
 | Test_Suggestion | 【建议】 | |
 | Comment | 【查找问题的思路】 | 如为空则填写"请填写" |
-| *(Redmine 登录用户)* | 解决者 | 当前登录用户 |
+| *(Redmine 登录用户)* | 解决者 | 按 Redmine 字段名动态查找，不再依赖固定字段 ID |
 | *(固定值)* | 状态 → Fixed | |
 | *(固定值)* | 完成度 → 100% | |
 
