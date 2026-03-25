@@ -14,9 +14,10 @@ syncRedmine - 独立后台程序
 配置: python3 syncRedmine.py --setup
 """
 
-import sys, os, re, json, base64, time
+import sys, os, re, json, base64, time, glob, logging
 import urllib.request, urllib.parse, urllib.error
 from datetime import datetime, timedelta, timezone
+from logging.handlers import TimedRotatingFileHandler
 
 try:
     import requests
@@ -39,10 +40,14 @@ from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor
 COMMIT_TOOL_DIR = os.path.join(os.path.expanduser('~'), '.commit_tool')
 CONFIG_FILE     = os.path.join(COMMIT_TOOL_DIR, 'sync_config.json')
 DEFAULT_LOG     = os.path.join(os.path.expanduser('~'), 'commit_data.log')
+APP_DATA_DIR    = os.path.join(os.path.expanduser('~'), '.local', 'share', 'syncRedmine')
+LOG_DIR         = os.path.join(APP_DATA_DIR, 'logs')
+LOG_FILE        = os.path.join(LOG_DIR, 'syncRedmine.log')
 PLACEHOLDER     = '请填写'
 POLL_INTERVAL   = 4          # 轮询间隔 (秒)
 POLL_TIMEOUT    = 180        # 最长等待 push 时间 (秒)
 RECENT_PUSH_SLACK = 8        # Gerrit 时间与本机时间允许偏差 (秒)
+LOG_RETENTION_DAYS = 3       # 保留最近 3 天日志（含当天）
 
 # commit_data.log 字段 → Redmine 自定义字段名
 FIELD_MAP = {
@@ -54,6 +59,54 @@ FIELD_MAP = {
 }
 FIX_FIELD_NAME    = '【修复情况】'
 SOLVER_FIELD_NAME = '解决者'
+
+
+def cleanup_old_logs():
+    """最多保留最近 3 天日志（当前日志 + 最近 2 个滚动日志）。"""
+    files = [p for p in glob.glob(os.path.join(LOG_DIR, 'syncRedmine.log*'))
+             if os.path.isfile(p)]
+    files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    for old_file in files[LOG_RETENTION_DAYS:]:
+        try:
+            os.remove(old_file)
+        except OSError:
+            pass
+
+
+def setup_logging():
+    logger = logging.getLogger('syncRedmine')
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        cleanup_old_logs()
+
+        handler = TimedRotatingFileHandler(
+            LOG_FILE,
+            when='midnight',
+            interval=1,
+            backupCount=max(LOG_RETENTION_DAYS - 1, 0),
+            encoding='utf-8',
+            delay=True,
+        )
+        handler.suffix = "%Y-%m-%d"
+        handler.extMatch = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+        handler.setFormatter(logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(threadName)s %(message)s'))
+        logger.addHandler(handler)
+        logger.info("日志系统已启动，日志文件: %s，保留天数: %s", LOG_FILE, LOG_RETENTION_DAYS)
+    except Exception as e:
+        logger.addHandler(logging.NullHandler())
+        print(f"[syncRedmine] 初始化日志失败: {e}", file=sys.stderr)
+
+    return logger
+
+
+logger = setup_logging()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -80,6 +133,7 @@ def save_config(cfg):
             d[k] = base64.b64encode(d[k].encode('utf-8')).decode('utf-8')
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
+    logger.info("账号配置已保存: %s", CONFIG_FILE)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -210,7 +264,7 @@ def fetch_gerrit_changes(config, topics, timeout=10):
     try:
         cookie = _gerrit_login(base, config['gerrit_username'], config['gerrit_password'])
     except Exception as e:
-        print(f"[syncRedmine] Gerrit 登录失败: {e}")
+        logger.warning("Gerrit 登录失败: %s", e)
         return None
 
     result = {}
@@ -228,7 +282,8 @@ def fetch_gerrit_changes(config, topics, timeout=10):
                         'updated': c.get('updated', ''),
                         'project': c.get('project', ''),
                     }
-        except Exception:
+        except Exception as e:
+            logger.warning("查询 Gerrit topic=%s 失败: %s", topic, e)
             continue
 
     return result if has_success else None
@@ -285,6 +340,7 @@ class GerritPoller(QThread):
 
     def cancel(self):
         self._stop = True
+        logger.info("已取消 Gerrit 轮询: topics=%s", self.topics)
 
     # ── Gerrit REST API ──────────────────────────────────────────────────────
     def _get_changes(self):
@@ -323,6 +379,7 @@ class GerritPoller(QThread):
 
     # ── 主轮询逻辑 ────────────────────────────────────────────────────────────
     def run(self):
+        logger.info("开始 Gerrit 轮询: topics=%s", self.topics)
         self.status_msg.emit("等待 push 完成...")
         initial = self.initial_changes
 
@@ -331,6 +388,7 @@ class GerritPoller(QThread):
             recent = self._find_recent_change(initial)
             if recent:
                 num, info = recent
+                logger.info("命中最近更新 change: change=%s topics=%s", num, self.topics)
                 self.push_detected.emit(self._build_url(num, info))
                 return
 
@@ -345,14 +403,17 @@ class GerritPoller(QThread):
                 recent = self._find_recent_change(current)
                 if recent:
                     num, info = recent
+                    logger.info("建立基线前已检测到 push: change=%s topics=%s", num, self.topics)
                     self.push_detected.emit(self._build_url(num, info))
                     return
                 initial = current
+                logger.info("已建立 Gerrit 基线: topics=%s changes=%s", self.topics, len(current))
                 self.status_msg.emit("已建立 Gerrit 基线，等待 push 完成...")
             else:
                 detected = self._detect_change(initial, current)
                 if detected:
                     num, info = detected
+                    logger.info("检测到 Gerrit push 完成: change=%s topics=%s", num, self.topics)
                     self.push_detected.emit(self._build_url(num, info))
                     return
                 self.status_msg.emit(f"等待 push 完成... ({elapsed}s)")
@@ -361,6 +422,7 @@ class GerritPoller(QThread):
             elapsed += POLL_INTERVAL
 
         if not self._stop:
+            logger.warning("等待 Gerrit push 超时: topics=%s timeout=%ss", self.topics, POLL_TIMEOUT)
             self.timed_out.emit()
 
 
@@ -394,13 +456,17 @@ class SyncWorker(QThread):
         try:
             issue_number = extract_first_number(self.fields.get('Bug number', ''))
             if not issue_number:
+                logger.warning("同步失败: Bug number 无效, fields=%s", self.fields.get('Bug number', ''))
                 self.finished_sig.emit(False, f"Bug number 无效")
                 return
             issue_id = int(issue_number)
+            logger.info("开始同步 Redmine: issue=%s status=%s hours=%s", issue_id,
+                        self.status_name, self.hours)
 
             self.log_sig.emit(f"获取 issue #{issue_id}...")
             r = self._get(f'/issues/{issue_id}.json')
             if r.status_code != 200:
+                logger.warning("获取 issue 失败: issue=%s http=%s", issue_id, r.status_code)
                 self.finished_sig.emit(False, f"获取 issue 失败: HTTP {r.status_code}")
                 return
 
@@ -419,6 +485,8 @@ class SyncWorker(QThread):
                     if s['name'].lower() == self.status_name.lower():
                         target_status_id = s['id']
                         break
+            if not target_status_id:
+                logger.warning("未匹配到目标状态: issue=%s status=%s", issue_id, self.status_name)
 
             # 组装自定义字段
             cfs = []
@@ -459,6 +527,7 @@ class SyncWorker(QThread):
             if r4.status_code in (200, 204):
                 msg = f"issue #{issue_id} 同步成功！"
             else:
+                logger.warning("更新 issue 失败: issue=%s http=%s", issue_id, r4.status_code)
                 self.finished_sig.emit(False,
                     f"更新失败: HTTP {r4.status_code}\n{r4.text[:300]}")
                 return
@@ -472,12 +541,16 @@ class SyncWorker(QThread):
                                    headers={'Content-Type': 'application/json'},
                                    data=json.dumps(te), timeout=10)
                 if r5.status_code in (200, 201):
+                    logger.info("工时记录成功: issue=%s hours=%s", issue_id, self.hours)
                     msg += f"  工时 {self.hours}h 已记录"
                 else:
+                    logger.warning("工时记录失败: issue=%s http=%s", issue_id, r5.status_code)
                     msg += f"  (工时记录失败: HTTP {r5.status_code})"
 
+            logger.info("Redmine 同步成功: issue=%s", issue_id)
             self.finished_sig.emit(True, msg)
         except Exception as e:
+            logger.exception("同步 Redmine 时发生异常")
             self.finished_sig.emit(False, str(e))
 
 
@@ -593,6 +666,7 @@ class SetupDialog(QDialog):
             'redmine_password':self.r_pass.text().strip(),
         }
         save_config(self.config)
+        logger.info("用户在配置窗口保存了账号配置")
         QMessageBox.information(self, "成功", "账号配置已保存 ✓")
         self.accept()
 
@@ -751,9 +825,11 @@ class SyncDialog(QDialog):
         return b
 
     def _reconfig(self):
+        logger.info("用户打开重新配置账号窗口")
         dlg = SetupDialog(existing=self.config, parent=self)
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.config
+            logger.info("同步窗口中的账号配置已更新")
 
     def _start_sync(self):
         self.btn_yes.setEnabled(False)
@@ -768,9 +844,12 @@ class SyncDialog(QDialog):
         try:
             hours = float(hours_text) if hours_text else 0.5
         except ValueError:
+            logger.warning("工时输入无效，使用默认值 0.5: %s", hours_text)
             hours = 0.5
 
         status_name = self.combo_status.currentText()
+        logger.info("用户确认同步: issue=%s status=%s hours=%s",
+                    self.fields.get('Bug number', ''), status_name, hours)
 
         self.worker = SyncWorker(self.config, self.fields, self.gerrit_url,
                                  hours=hours, status_name=status_name)
@@ -780,6 +859,7 @@ class SyncDialog(QDialog):
 
     def _on_done(self, ok, msg):
         if ok:
+            logger.info("同步结果成功: %s", msg)
             self._set_status(f"✓  {msg}", "#4CAF50")
             self.btn_no.setText("关 闭")
             self.btn_no.setEnabled(True)
@@ -787,6 +867,7 @@ class SyncDialog(QDialog):
                 "QPushButton{background:#2196F3;color:white;border:none;"
                 "border-radius:5px;font-size:11pt;font-weight:bold;}")
         else:
+            logger.warning("同步结果失败: %s", msg)
             self._set_status(f"✗  {msg}", "#f44336")
             self.btn_yes.setText("重 试")
             self.btn_yes.setEnabled(True)
@@ -810,6 +891,7 @@ class SyncRedmineApp:
         self.config   = load_config()
         self._poller  = None
         self.app.setQuitOnLastWindowClosed(False)
+        logger.info("syncRedmine 启动，当前配置状态: %s", "已加载" if self.config else "未配置")
 
         # ── 托盘图标 ──────────────────────────────────────────────────────────
         self.tray = QSystemTrayIcon(make_icon())
@@ -871,17 +953,23 @@ class SyncRedmineApp:
     def _on_log_changed(self, log_mtime):
         fields = parse_commit_log()
         if not fields:
+            logger.warning("检测到 commit_data.log 变化，但解析结果为空")
             return
         issue_number = extract_first_number(fields.get('Bug number', ''))
         if not issue_number:
+            logger.info("跳过同步: Bug number 无效或为空: %s", fields.get('Bug number', ''))
             return  # NOBUG 等跳过
 
         topics = get_gerrit_topics(fields)
         if not topics:
+            logger.info("跳过同步: 未提取到 Gerrit topics")
             return
 
         if not self.config:
+            logger.warning("检测到新提交但未配置账号，已跳过: issue=%s", issue_number)
             return  # 未配置账号，静默跳过
+
+        logger.info("检测到新提交: issue=%s topics=%s", issue_number, topics)
 
         # 取消旧的轮询
         if self._poller and self._poller.isRunning():
@@ -910,6 +998,8 @@ class SyncRedmineApp:
         self._poller.start()
 
     def _on_push_detected(self, fields, gerrit_url):
+        logger.info("检测到 push 完成: issue=%s gerrit=%s",
+                    fields.get('Bug number', ''), gerrit_url)
         self.tray.setIcon(make_icon('#4CAF50', badge='!'))  # 绿色+感叹号
         self.tray.setToolTip(self.TOOLTIP_PENDING)
         self.tray.showMessage(
@@ -919,6 +1009,7 @@ class SyncRedmineApp:
         QTimer.singleShot(500, lambda: self._show_sync(fields, gerrit_url))
 
     def _on_poll_timeout(self):
+        logger.warning("本次 Gerrit 轮询超时，恢复空闲状态")
         self.tray.setIcon(make_icon())
         self.tray.setToolTip(self.TOOLTIP_IDLE)
 
@@ -936,11 +1027,14 @@ class SyncRedmineApp:
 
     # ── 配置 ──────────────────────────────────────────────────────────────────
     def _show_setup(self):
+        logger.info("用户打开配置账号窗口")
         dlg = SetupDialog(existing=self.config)
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.config
+            logger.info("主窗口账号配置已更新")
 
     def _first_run(self):
+        logger.info("首次运行，弹出引导配置")
         QMessageBox.information(
             None, "欢迎使用 syncRedmine",
             "首次使用，请配置 Gerrit 和 Redmine 账号。\n\n"

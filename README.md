@@ -17,6 +17,7 @@ commit 工具 ──→ 写入 ~/commit_data.log ──→ git push
 - **零侵入**：不修改 commit 工具的任何代码
 - **inotify**：利用 Linux 内核事件监控文件变化，空闲时 CPU 零占用
 - **自动检测 push**：优先按 `Bug number` 关联，同时兼容 `Topic ID`；通过 change 快照对比，并对“基线建立前 push 已完成”场景做最近更新时间兜底
+- **运行日志**：自动写入 `~/.local/share/syncRedmine/logs/`，按天滚动，只保留最近 3 天日志，避免长期积累
 
 ## 同步的字段
 
@@ -101,6 +102,13 @@ python3 ~/.local/share/syncRedmine/syncRedmine.py &
 python3 ~/.local/share/syncRedmine/syncRedmine.py --setup
 ```
 
+### 运行日志
+
+- 日志目录：`~/.local/share/syncRedmine/logs/`
+- 当前日志：`~/.local/share/syncRedmine/logs/syncRedmine.log`
+- 滚动策略：按天切分，保留当天日志 + 前 2 天日志
+- 清理策略：进入第 4 天时，自动删除第 1 天的旧日志
+
 ## 卸载
 
 ```bash
@@ -134,3 +142,4 @@ syncRedmine/
 | `~/.config/autostart/syncRedmine.desktop` | 开机自启动配置 |
 | `~/.commit_tool/sync_config.json` | 账号配置（密码 base64 编码） |
 | `~/commit_data.log` | commit 工具写入的提交日志（只读监控） |
+| `~/.local/share/syncRedmine/logs/syncRedmine.log` | 运行日志（按天滚动，保留 3 天） |
