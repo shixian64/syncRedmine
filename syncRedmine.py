@@ -120,7 +120,8 @@ QLabel#SectionTitle {
 }
 QLabel#SectionDesc {
     color: #64748b;
-    font-size: 9.5pt;
+    font-size: 9pt;
+    padding-bottom: 2px;
 }
 QLabel#FieldCaption {
     color: #475467;
@@ -911,6 +912,8 @@ class SetupDialog(AnimatedDialog):
         desc = QLabel(subtitle)
         desc.setObjectName("SectionDesc")
         desc.setWordWrap(True)
+        desc.setContentsMargins(0, 0, 0, 2)
+        desc.setMinimumHeight(desc.fontMetrics().lineSpacing() + 4)
 
         text_col.addWidget(ttl)
         text_col.addWidget(desc)
@@ -989,7 +992,7 @@ class SetupDialog(AnimatedDialog):
         panels = QHBoxLayout()
         panels.setSpacing(16)
 
-        g_panel, g_layout = self._panel("Gerrit", "用于轮询 change 状态与生成修复链接。", "检测")
+        g_panel, g_layout = self._panel("Gerrit", "轮询 change 状态并生成修复链接。", "检测")
         self.g_url  = self._le('http://...', val=cfg.get('gerrit_url', 'http://122.227.250.174:8085'))
         self.g_user = self._le('登录用户名', val=cfg.get('gerrit_username', ''))
         self.g_pass = self._le('登录密码', pw=True, val=cfg.get('gerrit_password', ''))
@@ -998,7 +1001,7 @@ class SetupDialog(AnimatedDialog):
         self._add_field(g_layout, "密码", self.g_pass)
         panels.addWidget(g_panel, 1)
 
-        r_panel, r_layout = self._panel("Redmine", "用于写回问题字段、工时与解决者。", "同步")
+        r_panel, r_layout = self._panel("Redmine", "写回问题字段、工时与解决者。", "同步")
         self.r_url  = self._le('http://...', val=cfg.get('redmine_url', 'http://122.227.250.174:8078'))
         self.r_user = self._le('登录用户名', val=cfg.get('redmine_username', ''))
         self.r_pass = self._le('登录密码', pw=True, val=cfg.get('redmine_password', ''))
@@ -1108,6 +1111,8 @@ class SyncDialog(AnimatedDialog):
         desc = QLabel(subtitle)
         desc.setObjectName("SectionDesc")
         desc.setWordWrap(True)
+        desc.setContentsMargins(0, 0, 0, 2)
+        desc.setMinimumHeight(desc.fontMetrics().lineSpacing() + 4)
         text_col.addWidget(ttl)
         text_col.addWidget(desc)
 
