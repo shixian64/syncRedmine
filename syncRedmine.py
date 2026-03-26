@@ -29,10 +29,17 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QGroupBox, QFormLayout, QMessageBox,
-    QFrame, QSystemTrayIcon, QMenu, QComboBox,
+    QFrame, QSystemTrayIcon, QMenu, QComboBox, QPlainTextEdit,
+    QGraphicsDropShadowEffect,
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QFileSystemWatcher
-from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor
+from PyQt5.QtCore import (
+    Qt, QThread, pyqtSignal, QTimer, QFileSystemWatcher,
+    QPropertyAnimation, QEasingCurve, QRectF,
+)
+from PyQt5.QtGui import (
+    QFont, QIcon, QPixmap, QPainter, QColor,
+    QLinearGradient, QPainterPath,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 常量
@@ -47,7 +54,7 @@ PLACEHOLDER     = '请填写'
 POLL_INTERVAL   = 4          # 轮询间隔 (秒)
 POLL_TIMEOUT    = 180        # 最长等待 push 时间 (秒)
 RECENT_PUSH_SLACK = 8        # Gerrit 时间与本机时间允许偏差 (秒)
-LOG_RETENTION_DAYS = 3       # 保留最近 3 天日志（含当天）
+LOG_RETENTION_DAYS = 3       # 最多保留最近 3 个日志文件（通常对应当天 + 前 2 天）
 
 # commit_data.log 字段 → Redmine 自定义字段名
 FIELD_MAP = {
@@ -61,8 +68,178 @@ FIX_FIELD_NAME    = '【修复情况】'
 SOLVER_FIELD_NAME = '解决者'
 
 
+APP_STYLE_SHEET = """
+QWidget {
+    font-family: "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+    color: #0f172a;
+}
+QDialog {
+    background: #eef4fb;
+}
+QFrame#DialogShell {
+    background: #ffffff;
+    border: 1px solid #dbe4ee;
+    border-radius: 24px;
+}
+QFrame#SectionPanel {
+    background: #fbfcff;
+    border: 1px solid #e7edf5;
+    border-radius: 18px;
+}
+QFrame#InfoStrip {
+    background: #f7faff;
+    border: 1px solid #dbe7ff;
+    border-radius: 16px;
+}
+QFrame#Divider {
+    background: #e8eef5;
+    min-height: 1px;
+    max-height: 1px;
+    border: none;
+}
+QLabel#HeroEyebrow {
+    color: rgba(255, 255, 255, 0.74);
+    font-size: 10pt;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+}
+QLabel#HeroTitle {
+    color: #ffffff;
+    font-size: 18pt;
+    font-weight: 700;
+}
+QLabel#HeroText {
+    color: rgba(255, 255, 255, 0.84);
+    font-size: 10pt;
+    line-height: 1.45em;
+}
+QLabel#SectionTitle {
+    color: #0f172a;
+    font-size: 11pt;
+    font-weight: 700;
+}
+QLabel#SectionDesc {
+    color: #64748b;
+    font-size: 9.5pt;
+}
+QLabel#FieldCaption {
+    color: #475467;
+    font-size: 9.4pt;
+    font-weight: 600;
+}
+QLabel#FieldHint {
+    color: #94a3b8;
+    font-size: 8.8pt;
+}
+QLabel#ValueText {
+    color: #0f172a;
+    font-size: 10pt;
+    line-height: 1.5em;
+}
+QLabel#MetaText {
+    color: #475467;
+    font-size: 9.3pt;
+    line-height: 1.4em;
+}
+QLabel#StatusText {
+    color: #334155;
+    font-size: 10pt;
+    line-height: 1.45em;
+}
+QLineEdit, QComboBox, QPlainTextEdit {
+    background: #ffffff;
+    border: 1px solid #d6deea;
+    border-radius: 12px;
+    padding: 8px 12px;
+    font-size: 10pt;
+    selection-background-color: #2563eb;
+}
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {
+    border: 1px solid #3b82f6;
+    background: #fdfefe;
+}
+QComboBox {
+    padding-right: 16px;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 24px;
+}
+QPushButton {
+    min-height: 44px;
+    padding: 0 18px;
+    border-radius: 14px;
+    font-size: 10.5pt;
+    font-weight: 700;
+    border: none;
+}
+QPushButton#PrimaryButton {
+    background: #2563eb;
+    color: #ffffff;
+}
+QPushButton#PrimaryButton:hover {
+    background: #1d4ed8;
+}
+QPushButton#PrimaryButton:pressed {
+    background: #1e40af;
+}
+QPushButton#SecondaryButton {
+    background: #e5e7eb;
+    color: #0f172a;
+}
+QPushButton#SecondaryButton:hover {
+    background: #dbe1ea;
+}
+QPushButton#LinkButton {
+    min-height: 30px;
+    background: transparent;
+    color: #2563eb;
+    padding: 0 4px;
+    font-weight: 600;
+}
+QPushButton#LinkButton:hover {
+    color: #1d4ed8;
+}
+QPushButton:disabled {
+    background: #cbd5e1;
+    color: #94a3b8;
+}
+QPlainTextEdit#ErrorDetail {
+    background: #fff5f5;
+    color: #b42318;
+    border: 1px solid #fecaca;
+    border-radius: 14px;
+    padding: 10px 12px;
+    font-size: 9.5pt;
+}
+QMenu {
+    background: #0f172a;
+    color: #f8fafc;
+    border: 1px solid #1e293b;
+    border-radius: 16px;
+    padding: 8px;
+}
+QMenu::item {
+    padding: 8px 18px;
+    margin: 2px 0;
+    border-radius: 10px;
+}
+QMenu::item:selected {
+    background: #1d4ed8;
+}
+QMenu::separator {
+    height: 1px;
+    background: #1e293b;
+    margin: 6px 8px;
+}
+QMessageBox {
+    background: #f8fafc;
+}
+"""
+
+
 def cleanup_old_logs():
-    """最多保留最近 3 天日志（当前日志 + 最近 2 个滚动日志）。"""
+    """最多保留最近 3 个日志文件（当前日志 + 最近 2 个滚动日志）。"""
     files = [p for p in glob.glob(os.path.join(LOG_DIR, 'syncRedmine.log*'))
              if os.path.isfile(p)]
     files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
@@ -142,8 +319,23 @@ def save_config(cfg):
 def parse_commit_log(path=DEFAULT_LOG):
     if not os.path.exists(path):
         return None
-    with open(path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    try:
+        with open(path, 'rb') as f:
+            raw = f.read()
+    except OSError as e:
+        logger.warning("读取 commit_data.log 失败: %s", e)
+        return None
+
+    try:
+        content = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        try:
+            content = raw.decode('gb18030')
+            logger.warning("commit_data.log 非 UTF-8，已回退按 gb18030 解码")
+        except UnicodeDecodeError:
+            content = raw.decode('utf-8', errors='replace')
+            logger.warning("commit_data.log 编码异常，已使用 replace 容错解码")
+
     fields = {}
     for key in ['Bug number', 'Topic ID', 'Author', 'Root Cause', 'Solution',
                 'Test_Report', 'Test_Suggestion', 'Comment']:
@@ -205,7 +397,19 @@ def _decode_gerrit_json(text):
 # ── Gerrit Cookie 认证 ────────────────────────────────────────────────────────
 GERRIT_COOKIE_CACHE = "/tmp/.syncredmine_gerrit_cookie"
 
-def _gerrit_login(base, username, password):
+def _extract_gerrit_cookie(headers):
+    cookie_values = []
+    if hasattr(headers, 'get_all'):
+        cookie_values.extend(headers.get_all("Set-Cookie") or [])
+    single = headers.get("Set-Cookie", "")
+    if single:
+        cookie_values.append(single)
+    cookie_blob = "\n".join(cookie_values)
+    m = re.search(r"GerritAccount=([^;]+)", cookie_blob)
+    return m.group(1) if m else None
+
+
+def _gerrit_login(base, username, password, timeout=15):
     """表单 POST 登录获取 GerritAccount cookie（与 gerrit_api.py 同机制）"""
     # 先检查缓存
     if os.path.exists(GERRIT_COOKIE_CACHE):
@@ -227,12 +431,19 @@ def _gerrit_login(base, username, password):
 
     opener = urllib.request.build_opener(NoRedirect)
     try:
-        opener.open(urllib.request.Request(login_url, data=data), timeout=15)
+        with opener.open(urllib.request.Request(login_url, data=data), timeout=timeout) as resp:
+            cookie = _extract_gerrit_cookie(resp.headers)
+            if cookie:
+                try:
+                    with open(GERRIT_COOKIE_CACHE, "w") as f:
+                        json.dump({"base_url": base, "cookie": cookie, "time": time.time()}, f)
+                    os.chmod(GERRIT_COOKIE_CACHE, 0o600)
+                except Exception:
+                    pass
+                return cookie
     except urllib.error.HTTPError as e:
-        cookie_hdr = e.headers.get("Set-Cookie", "")
-        m = re.search(r"GerritAccount=([^;]+)", cookie_hdr)
-        if m:
-            cookie = m.group(1)
+        cookie = _extract_gerrit_cookie(e.headers)
+        if cookie:
             try:
                 with open(GERRIT_COOKIE_CACHE, "w") as f:
                     json.dump({"base_url": base, "cookie": cookie, "time": time.time()}, f)
@@ -243,7 +454,7 @@ def _gerrit_login(base, username, password):
     raise RuntimeError("Gerrit 登录失败：未获取到 cookie")
 
 
-def _gerrit_api_get(base, cookie, path, params=None):
+def _gerrit_api_get(base, cookie, path, params=None, timeout=30):
     """用 cookie 调用 Gerrit REST API"""
     url = f"{base}/{path.lstrip('/')}"
     if params:
@@ -251,7 +462,7 @@ def _gerrit_api_get(base, cookie, path, params=None):
     req = urllib.request.Request(url)
     req.add_header("Cookie", f"GerritAccount={cookie}")
     req.add_header("Accept", "application/json")
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return _decode_gerrit_json(resp.read().decode("utf-8"))
 
 
@@ -262,7 +473,9 @@ def fetch_gerrit_changes(config, topics, timeout=10):
         topics = [topics]
 
     try:
-        cookie = _gerrit_login(base, config['gerrit_username'], config['gerrit_password'])
+        cookie = _gerrit_login(
+            base, config['gerrit_username'], config['gerrit_password'],
+            timeout=timeout)
     except Exception as e:
         logger.warning("Gerrit 登录失败: %s", e)
         return None
@@ -273,7 +486,8 @@ def fetch_gerrit_changes(config, topics, timeout=10):
     for topic in topics:
         try:
             changes = _gerrit_api_get(base, cookie, "changes/",
-                                      {"q": f"topic:{topic}"})
+                                      {"q": f"topic:{topic}"},
+                                      timeout=timeout)
             has_success = True
             for c in changes:
                 num = c.get('_number')
@@ -297,26 +511,129 @@ def build_gerrit_change_url(base, change_number, change_info=None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# UI 基础
+# ═══════════════════════════════════════════════════════════════════════════════
+def apply_shadow(widget, blur=42, y_offset=12, alpha=30):
+    shadow = QGraphicsDropShadowEffect(widget)
+    shadow.setBlurRadius(blur)
+    shadow.setOffset(0, y_offset)
+    shadow.setColor(QColor(15, 23, 42, alpha))
+    widget.setGraphicsEffect(shadow)
+
+
+def make_badge(text, bg='#dbeafe', fg='#1d4ed8'):
+    label = QLabel(text)
+    label.setAlignment(Qt.AlignCenter)
+    label.setStyleSheet(
+        "QLabel{"
+        f"background:{bg};color:{fg};"
+        "border-radius:11px;padding:6px 10px;"
+        "font-size:9pt;font-weight:700;}")
+    return label
+
+
+def tint_badge(label, text, bg, fg):
+    label.setText(text)
+    label.setStyleSheet(
+        "QLabel{"
+        f"background:{bg};color:{fg};"
+        "border-radius:11px;padding:6px 10px;"
+        "font-size:9pt;font-weight:700;}")
+
+
+def make_divider():
+    line = QFrame()
+    line.setObjectName("Divider")
+    return line
+
+
+class GradientPanel(QFrame):
+    def __init__(self, start_color, end_color, glow_color, parent=None):
+        super().__init__(parent)
+        self.start_color = QColor(start_color)
+        self.end_color = QColor(end_color)
+        self.glow_color = QColor(glow_color)
+        self.setMinimumHeight(156)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, 24, 24)
+
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        gradient.setColorAt(0, self.start_color)
+        gradient.setColorAt(1, self.end_color)
+        painter.fillPath(path, gradient)
+        painter.setClipPath(path)
+
+        glow = QColor(self.glow_color)
+        glow.setAlpha(85)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(glow)
+        painter.drawEllipse(QRectF(rect.width() * 0.64, -rect.height() * 0.18,
+                                   rect.width() * 0.42, rect.height() * 0.80))
+
+        soft = QColor(255, 255, 255, 26)
+        painter.setBrush(soft)
+        painter.drawEllipse(QRectF(-rect.width() * 0.10, rect.height() * 0.62,
+                                   rect.width() * 0.36, rect.height() * 0.48))
+
+        painter.setPen(QColor(255, 255, 255, 34))
+        painter.drawPath(path)
+        super().paintEvent(event)
+
+
+class AnimatedDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._fade_anim = None
+        self._has_animated = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._has_animated:
+            return
+        self._has_animated = True
+        self.setWindowOpacity(0.0)
+        self._fade_anim = QPropertyAnimation(self, b'windowOpacity', self)
+        self._fade_anim.setDuration(220)
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+        self._fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._fade_anim.start()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 图标
 # ═══════════════════════════════════════════════════════════════════════════════
 def make_icon(color='#4a90d9', badge=None):
-    pix = QPixmap(32, 32)
+    pix = QPixmap(36, 36)
     pix.fill(Qt.transparent)
     p = QPainter(pix)
     p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QColor(color))
-    p.setPen(Qt.NoPen)
-    p.drawEllipse(2, 2, 28, 28)
+    base = QColor(color)
+    rect = QRectF(2, 2, 32, 32)
+    path = QPainterPath()
+    path.addRoundedRect(rect, 10, 10)
+    grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
+    grad.setColorAt(0, base.lighter(118))
+    grad.setColorAt(1, base.darker(110))
+    p.fillPath(path, grad)
+    p.setPen(QColor(255, 255, 255, 42))
+    p.drawPath(path)
     p.setPen(Qt.white)
     p.setFont(QFont('', 13, QFont.Bold))
     p.drawText(pix.rect(), Qt.AlignCenter, 'R')
     if badge:
         p.setBrush(QColor('#f44336'))
         p.setPen(Qt.NoPen)
-        p.drawEllipse(20, 0, 12, 12)
+        p.drawEllipse(23, 1, 11, 11)
         p.setPen(Qt.white)
         p.setFont(QFont('', 7, QFont.Bold))
-        p.drawText(QtCore.QRect(20, 0, 12, 12), Qt.AlignCenter, '!')
+        p.drawText(QtCore.QRect(23, 1, 11, 11), Qt.AlignCenter, badge[:1])
     p.end()
     return QIcon(pix)
 
@@ -557,96 +874,160 @@ class SyncWorker(QThread):
 # ═══════════════════════════════════════════════════════════════════════════════
 # 账号配置对话框
 # ═══════════════════════════════════════════════════════════════════════════════
-class SetupDialog(QDialog):
-    STYLE_INPUT = ("QLineEdit{border:1px solid #ccc;border-radius:4px;"
-                   "padding:4px 6px;font-size:10pt;}"
-                   "QLineEdit:focus{border:1.5px solid #4a90d9;}")
-    STYLE_GROUP = "QGroupBox{font-weight:bold;font-size:10pt;padding-top:8px;}"
+class SetupDialog(AnimatedDialog):
 
     def __init__(self, existing=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("syncRedmine — 配置平台账号")
-        self.setFixedWidth(500)
+        self.setWindowIcon(make_icon())
+        self.setFixedWidth(700)
         self.config = {}
         self._build(existing or {})
 
     def _le(self, placeholder='', pw=False, val=''):
         e = QLineEdit(val)
         e.setPlaceholderText(placeholder)
-        e.setFixedHeight(34)
-        e.setStyleSheet(self.STYLE_INPUT)
+        e.setFixedHeight(44)
+        if not pw:
+            e.setClearButtonEnabled(True)
         if pw:
             e.setEchoMode(QLineEdit.Password)
         return e
 
-    def _build(self, cfg):
-        root = QVBoxLayout(self)
-        root.setSpacing(12)
-        root.setContentsMargins(22, 20, 22, 20)
+    @staticmethod
+    def _panel(title, subtitle, badge_text):
+        panel = QFrame()
+        panel.setObjectName("SectionPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
 
-        # ── 标题 ──────────────────────────────────────────────────────────────
-        ico = QLabel()
-        pix = make_icon('#4a90d9').pixmap(40, 40)
-        ico.setPixmap(pix)
-        ico.setAlignment(Qt.AlignCenter)
-        root.addWidget(ico)
+        head = QHBoxLayout()
+        text_col = QVBoxLayout()
+        text_col.setSpacing(4)
 
-        title = QLabel("配置两个平台的账号密码")
-        title.setFont(QFont('', 14, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        root.addWidget(title)
+        ttl = QLabel(title)
+        ttl.setObjectName("SectionTitle")
+        desc = QLabel(subtitle)
+        desc.setObjectName("SectionDesc")
+        desc.setWordWrap(True)
 
-        hint = QLabel("账号信息仅保存在本机  ~/.commit_tool/sync_config.json")
-        hint.setAlignment(Qt.AlignCenter)
-        hint.setStyleSheet("color:#999; font-size:9pt;")
-        root.addWidget(hint)
-
-        sep = QFrame(); sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("background:#e0e0e0; max-height:1px;")
-        root.addWidget(sep)
-
-        # ── Gerrit ────────────────────────────────────────────────────────────
-        gb = QGroupBox("  Gerrit  代码审核平台")
-        gb.setStyleSheet(self.STYLE_GROUP)
-        gf = QFormLayout(gb); gf.setSpacing(10); gf.setContentsMargins(12,12,12,12)
-        self.g_url  = self._le('http://...', val=cfg.get('gerrit_url','http://122.227.250.174:8085'))
-        self.g_user = self._le('登录用户名', val=cfg.get('gerrit_username',''))
-        self.g_pass = self._le('登录密码',   pw=True, val=cfg.get('gerrit_password',''))
-        gf.addRow("服务器地址:", self.g_url)
-        gf.addRow("用  户  名:", self.g_user)
-        gf.addRow("密      码:", self.g_pass)
-        root.addWidget(gb)
-
-        # ── Redmine ───────────────────────────────────────────────────────────
-        rb = QGroupBox("  Redmine  问题跟踪平台")
-        rb.setStyleSheet(self.STYLE_GROUP)
-        rf = QFormLayout(rb); rf.setSpacing(10); rf.setContentsMargins(12,12,12,12)
-        self.r_url  = self._le('http://...', val=cfg.get('redmine_url','http://122.227.250.174:8078'))
-        self.r_user = self._le('登录用户名', val=cfg.get('redmine_username',''))
-        self.r_pass = self._le('登录密码',   pw=True, val=cfg.get('redmine_password',''))
-        rf.addRow("服务器地址:", self.r_url)
-        rf.addRow("用  户  名:", self.r_user)
-        rf.addRow("密      码:", self.r_pass)
-        root.addWidget(rb)
-
-        # ── 按钮 ──────────────────────────────────────────────────────────────
-        row = QHBoxLayout(); row.setSpacing(10)
-        row.addWidget(self._mkbtn("保存配置", '#4a90d9', self._save))
-        row.addWidget(self._mkbtn("取  消",   '#9e9e9e', self.reject))
-        root.addLayout(row)
+        text_col.addWidget(ttl)
+        text_col.addWidget(desc)
+        head.addLayout(text_col, 1)
+        head.addWidget(make_badge(badge_text))
+        layout.addLayout(head)
+        layout.addWidget(make_divider())
+        return panel, layout
 
     @staticmethod
-    def _mkbtn(text, color, slot):
+    def _add_field(layout, title, widget, hint=None):
+        cap = QLabel(title)
+        cap.setObjectName("FieldCaption")
+        layout.addWidget(cap)
+        layout.addWidget(widget)
+        if hint:
+            lbl = QLabel(hint)
+            lbl.setObjectName("FieldHint")
+            lbl.setWordWrap(True)
+            layout.addWidget(lbl)
+
+    @staticmethod
+    def _mkbtn(text, role, slot):
         b = QPushButton(text)
-        b.setFixedHeight(40)
+        b.setObjectName(role)
         b.setCursor(Qt.PointingHandCursor)
-        b.setStyleSheet(
-            f"QPushButton{{background:{color};color:white;border:none;"
-            f"border-radius:5px;font-size:11pt;}}"
-            f"QPushButton:hover{{opacity:0.85;}}"
-            f"QPushButton:pressed{{padding-top:2px;}}")
         b.clicked.connect(slot)
         return b
+
+    def _build(self, cfg):
+        root = QVBoxLayout(self)
+        root.setSpacing(0)
+        root.setContentsMargins(18, 18, 18, 18)
+
+        shell = QFrame()
+        shell.setObjectName("DialogShell")
+        apply_shadow(shell, blur=52, y_offset=16, alpha=34)
+        root.addWidget(shell)
+
+        body = QVBoxLayout(shell)
+        body.setSpacing(18)
+        body.setContentsMargins(24, 24, 24, 24)
+
+        hero = GradientPanel('#0f172a', '#2563eb', '#60a5fa')
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setSpacing(10)
+        hero_layout.setContentsMargins(24, 22, 24, 22)
+
+        hero_top = QHBoxLayout()
+        hero_top.addWidget(make_badge("本地同步助手", 'rgba(255,255,255,0.16)', '#ffffff'))
+        hero_top.addStretch()
+        hero_top.addWidget(make_badge("账号配置", 'rgba(255,255,255,0.10)', '#dbeafe'))
+        hero_layout.addLayout(hero_top)
+
+        eyebrow = QLabel("syncRedmine")
+        eyebrow.setObjectName("HeroEyebrow")
+        hero_layout.addWidget(eyebrow)
+
+        title = QLabel("配置 Gerrit 与 Redmine 账号")
+        title.setObjectName("HeroTitle")
+        title.setWordWrap(True)
+        hero_layout.addWidget(title)
+
+        hint = QLabel("用于检测 Gerrit push，并将提交说明同步回 Redmine。")
+        hint.setObjectName("HeroText")
+        hint.setWordWrap(True)
+        hero_layout.addWidget(hint)
+
+        meta = QLabel("配置仅保存在本机 ~/.commit_tool/sync_config.json")
+        meta.setObjectName("HeroText")
+        meta.setWordWrap(True)
+        hero_layout.addWidget(meta)
+
+        body.addWidget(hero)
+
+        panels = QHBoxLayout()
+        panels.setSpacing(16)
+
+        g_panel, g_layout = self._panel("Gerrit", "用于轮询 change 状态与生成修复链接。", "检测")
+        self.g_url  = self._le('http://...', val=cfg.get('gerrit_url', 'http://122.227.250.174:8085'))
+        self.g_user = self._le('登录用户名', val=cfg.get('gerrit_username', ''))
+        self.g_pass = self._le('登录密码', pw=True, val=cfg.get('gerrit_password', ''))
+        self._add_field(g_layout, "服务器地址", self.g_url, "示例：http://host:port")
+        self._add_field(g_layout, "用户名", self.g_user)
+        self._add_field(g_layout, "密码", self.g_pass)
+        panels.addWidget(g_panel, 1)
+
+        r_panel, r_layout = self._panel("Redmine", "用于写回问题字段、工时与解决者。", "同步")
+        self.r_url  = self._le('http://...', val=cfg.get('redmine_url', 'http://122.227.250.174:8078'))
+        self.r_user = self._le('登录用户名', val=cfg.get('redmine_username', ''))
+        self.r_pass = self._le('登录密码', pw=True, val=cfg.get('redmine_password', ''))
+        self._add_field(r_layout, "服务器地址", self.r_url, "示例：http://host:port")
+        self._add_field(r_layout, "用户名", self.r_user)
+        self._add_field(r_layout, "密码", self.r_pass)
+        panels.addWidget(r_panel, 1)
+
+        body.addLayout(panels)
+
+        info = QFrame()
+        info.setObjectName("InfoStrip")
+        info_layout = QHBoxLayout(info)
+        info_layout.setContentsMargins(16, 14, 16, 14)
+        info_layout.setSpacing(12)
+        info_layout.addWidget(make_badge("说明", '#dbeafe', '#1d4ed8'))
+
+        note = QLabel("账号信息仅用于本机检测与同步，不会修改 commit_tool 的现有流程。")
+        note.setObjectName("MetaText")
+        note.setWordWrap(True)
+        info_layout.addWidget(note, 1)
+        body.addWidget(info)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addStretch()
+        row.addWidget(self._mkbtn("取消", "SecondaryButton", self.reject))
+        row.addWidget(self._mkbtn("保存配置", "PrimaryButton", self._save))
+        body.addLayout(row)
 
     def _save(self):
         if not self.g_user.text().strip():
@@ -674,9 +1055,25 @@ class SetupDialog(QDialog):
 # ═══════════════════════════════════════════════════════════════════════════════
 # 同步确认对话框
 # ═══════════════════════════════════════════════════════════════════════════════
-class SyncDialog(QDialog):
-    CARD_STYLE = ("QGroupBox{background:#f8f9fa;border:1px solid #e0e0e0;"
-                  "border-radius:6px;padding-top:10px;font-weight:bold;font-size:10pt;}")
+class SyncDialog(AnimatedDialog):
+    STATUS_STYLES = {
+        'idle': {
+            'badge': ('待同步', '#dbeafe', '#1d4ed8'),
+            'text_color': '#1d4ed8',
+        },
+        'running': {
+            'badge': ('同步中', '#dbeafe', '#1d4ed8'),
+            'text_color': '#1d4ed8',
+        },
+        'success': {
+            'badge': ('已完成', '#dcfce7', '#15803d'),
+            'text_color': '#16a34a',
+        },
+        'error': {
+            'badge': ('失败', '#fee2e2', '#b91c1c'),
+            'text_color': '#dc2626',
+        },
+    }
 
     def __init__(self, config, fields, gerrit_url, parent=None):
         super().__init__(parent)
@@ -684,160 +1081,263 @@ class SyncDialog(QDialog):
         self.fields     = fields
         self.gerrit_url = gerrit_url
         self.worker     = None
+        self._error_anim = None
+        self.config_changed = False
+        self.issue_number = extract_first_number(self.fields.get('Bug number', '')) or (
+            self.fields.get('Bug number', '').strip() or '-')
         self.setWindowTitle("syncRedmine — 同步提交信息到 Redmine")
-        self.setFixedWidth(580)
+        self.setWindowIcon(make_icon('#22c55e', '!'))
+        self.setFixedWidth(920)
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self._build()
 
+    @staticmethod
+    def _panel(title, subtitle, badge=None, badge_style=None):
+        panel = QFrame()
+        panel.setObjectName("SectionPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        head = QHBoxLayout()
+        text_col = QVBoxLayout()
+        text_col.setSpacing(4)
+
+        ttl = QLabel(title)
+        ttl.setObjectName("SectionTitle")
+        desc = QLabel(subtitle)
+        desc.setObjectName("SectionDesc")
+        desc.setWordWrap(True)
+        text_col.addWidget(ttl)
+        text_col.addWidget(desc)
+
+        head.addLayout(text_col, 1)
+        if badge:
+            if badge_style:
+                head.addWidget(make_badge(badge, *badge_style))
+            else:
+                head.addWidget(make_badge(badge))
+        layout.addLayout(head)
+        layout.addWidget(make_divider())
+        return panel, layout
+
+    @staticmethod
+    def _field_block(label_text, widget, hint=None):
+        wrapper = QFrame()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        label = QLabel(label_text)
+        label.setObjectName("FieldCaption")
+        layout.addWidget(label)
+        layout.addWidget(widget)
+
+        if hint:
+            note = QLabel(hint)
+            note.setObjectName("FieldHint")
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        return wrapper
+
+    @staticmethod
+    def _make_value_widget(title, value, link=None):
+        wrapper = QFrame()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("FieldCaption")
+        layout.addWidget(title_lbl)
+
+        if link:
+            text = value or PLACEHOLDER
+            value_lbl = QLabel(f'<a href="{link}" style="color:#2563eb;">{text}</a>')
+            value_lbl.setOpenExternalLinks(True)
+        else:
+            value_lbl = QLabel(value or PLACEHOLDER)
+        value_lbl.setObjectName("ValueText")
+        value_lbl.setWordWrap(True)
+        value_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+        layout.addWidget(value_lbl)
+        return wrapper
+
+    @staticmethod
+    def _mkbtn(text, role, slot):
+        b = QPushButton(text)
+        b.setObjectName(role)
+        b.setCursor(Qt.PointingHandCursor)
+        b.clicked.connect(slot)
+        return b
+
     def _build(self):
         root = QVBoxLayout(self)
-        root.setSpacing(12)
-        root.setContentsMargins(20, 18, 20, 18)
+        root.setSpacing(0)
+        root.setContentsMargins(18, 18, 18, 18)
 
-        # ── 标题行 ────────────────────────────────────────────────────────────
-        hrow = QHBoxLayout()
-        ico_lbl = QLabel()
-        ico_lbl.setPixmap(make_icon('#4CAF50', badge='!').pixmap(36, 36))
-        hrow.addWidget(ico_lbl)
-        t = QLabel("检测到提交完成，是否同步到 Redmine？")
-        t.setFont(QFont('', 12, QFont.Bold))
-        hrow.addWidget(t, 1)
-        root.addLayout(hrow)
+        shell = QFrame()
+        shell.setObjectName("DialogShell")
+        apply_shadow(shell, blur=52, y_offset=16, alpha=34)
+        root.addWidget(shell)
 
-        # ── 提交信息卡片 ───────────────────────────────────────────────────────
-        card = QGroupBox("提交信息预览")
-        card.setStyleSheet(self.CARD_STYLE)
-        fl = QFormLayout(card)
-        fl.setSpacing(7)
-        fl.setContentsMargins(14, 10, 14, 12)
+        body = QVBoxLayout(shell)
+        body.setSpacing(18)
+        body.setContentsMargins(24, 24, 24, 24)
 
-        def add_row(k, v, maxlen=80):
-            v = (v or '-')
-            lbl = QLabel(v[:maxlen] + ('…' if len(v) > maxlen else ''))
-            lbl.setWordWrap(True)
-            lbl.setStyleSheet("color:#333;")
-            key_lbl = QLabel(k)
-            key_lbl.setStyleSheet("color:#555; font-weight:bold;")
-            fl.addRow(key_lbl, lbl)
+        hero = GradientPanel('#08111f', '#0f766e', '#34d399')
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setSpacing(10)
+        hero_layout.setContentsMargins(24, 22, 24, 22)
 
-        add_row("Issue:",    f"#{self.fields.get('Bug number', '-')}")
-        add_row("提交者:",   self.fields.get('Author', '-'))
-        add_row("问题根源:", self.fields.get('Root Cause') or PLACEHOLDER)
-        add_row("修复方案:", self.fields.get('Solution') or PLACEHOLDER)
+        hero_top = QHBoxLayout()
+        hero_top.addWidget(make_badge("检测到 Gerrit Push", 'rgba(255,255,255,0.16)', '#ffffff'))
+        hero_top.addStretch()
+        hero_top.addWidget(make_badge(f"Issue #{self.issue_number}", 'rgba(255,255,255,0.12)', '#d1fae5'))
+        hero_layout.addLayout(hero_top)
 
-        gerrit_display = (self.gerrit_url or f'(未获取到，将填写"{PLACEHOLDER}")')
-        url_lbl = QLabel(f'<a href="{self.gerrit_url}" style="color:#1565c0;">'
-                         f'{gerrit_display[:80]}</a>')
-        url_lbl.setOpenExternalLinks(True)
-        url_lbl.setWordWrap(True)
-        url_lbl.setStyleSheet("color:#1565c0;")
-        fl.addRow(QLabel('<b style="color:#555;">Gerrit:</b>'), url_lbl)
-        root.addWidget(card)
+        eyebrow = QLabel("syncRedmine")
+        eyebrow.setObjectName("HeroEyebrow")
+        hero_layout.addWidget(eyebrow)
 
-        # ── 用户可编辑字段 ─────────────────────────────────────────────────
-        INPUT_STYLE = ("QLineEdit{border:1px solid #ccc;border-radius:4px;"
-                       "padding:4px 6px;font-size:10pt;}"
-                       "QLineEdit:focus{border:1.5px solid #4a90d9;}")
-        edit_card = QGroupBox("请确认 / 填写以下信息")
-        edit_card.setStyleSheet(self.CARD_STYLE)
-        ef = QFormLayout(edit_card)
-        ef.setSpacing(7)
-        ef.setContentsMargins(14, 10, 14, 12)
+        title = QLabel("准备同步到 Redmine")
+        title.setObjectName("HeroTitle")
+        title.setWordWrap(True)
+        hero_layout.addWidget(title)
 
-        self.edit_comment = QLineEdit(self.fields.get('Comment', '').strip())
-        self.edit_comment.setPlaceholderText('请填写查找问题的思路（留空默认"请填写"）')
-        self.edit_comment.setFixedHeight(34)
-        self.edit_comment.setStyleSheet(INPUT_STYLE)
-        k1 = QLabel("【查找问题的思路】:")
-        k1.setStyleSheet("color:#555; font-weight:bold;")
-        ef.addRow(k1, self.edit_comment)
+        subtitle = QLabel("提交信息已就绪，请确认工时、状态与查找思路后再执行同步。")
+        subtitle.setObjectName("HeroText")
+        subtitle.setWordWrap(True)
+        hero_layout.addWidget(subtitle)
+        body.addWidget(hero)
+
+        top = QHBoxLayout()
+        top.setSpacing(16)
+
+        preview_panel, preview_layout = self._panel(
+            "提交概览",
+            "来自 commit_data.log 与 Gerrit 检测结果。",
+            badge="预览")
+        preview_layout.addWidget(self._make_value_widget("Issue", f"#{self.issue_number}"))
+        preview_layout.addWidget(make_divider())
+        preview_layout.addWidget(self._make_value_widget("提交者", self.fields.get('Author', '-') or '-'))
+        preview_layout.addWidget(make_divider())
+        preview_layout.addWidget(self._make_value_widget("问题根源", self.fields.get('Root Cause') or PLACEHOLDER))
+        preview_layout.addWidget(make_divider())
+        preview_layout.addWidget(self._make_value_widget("修复方案", self.fields.get('Solution') or PLACEHOLDER))
+        preview_layout.addWidget(make_divider())
+        gerrit_display = self.gerrit_url or f'未获取到，后续将填写“{PLACEHOLDER}”'
+        preview_layout.addWidget(self._make_value_widget("Gerrit", gerrit_display, link=self.gerrit_url or None))
+        top.addWidget(preview_panel, 1)
+
+        edit_panel, edit_layout = self._panel(
+            "同步前确认",
+            "补充将写回 Redmine 的字段。",
+            badge="编辑")
+
+        self.edit_comment = QPlainTextEdit()
+        self.edit_comment.setPlainText(self.fields.get('Comment', '').strip())
+        self.edit_comment.setPlaceholderText('请填写查找问题的思路（留空默认“请填写”）')
+        self.edit_comment.setFixedHeight(124)
+        edit_layout.addWidget(self._field_block(
+            "【查找问题的思路】", self.edit_comment, "支持手动补充；留空时将使用默认占位内容。"))
+
+        meta_row = QHBoxLayout()
+        meta_row.setSpacing(12)
 
         self.edit_hours = QLineEdit("0.5")
         self.edit_hours.setPlaceholderText('0.5')
-        self.edit_hours.setFixedHeight(34)
-        self.edit_hours.setStyleSheet(INPUT_STYLE)
-        k2 = QLabel('<b style="color:#555;">工时（小时）</b>'
-                     '<span style="color:red;"> *</span>')
-        k2.setTextFormat(Qt.RichText)
-        ef.addRow(k2, self.edit_hours)
+        self.edit_hours.setFixedHeight(44)
+        meta_row.addWidget(self._field_block("工时（小时）*", self.edit_hours, "默认值 0.5"), 1)
 
-        COMBO_STYLE = ("QComboBox{border:1px solid #ccc;border-radius:4px;"
-                       "padding:4px 6px;font-size:10pt;}"
-                       "QComboBox:focus{border:1.5px solid #4a90d9;}")
         self.combo_status = QComboBox()
         self.combo_status.addItems(["OnGoing", "Fixed"])
         self.combo_status.setCurrentIndex(0)
-        self.combo_status.setFixedHeight(34)
-        self.combo_status.setStyleSheet(COMBO_STYLE)
-        k3 = QLabel("状态:")
-        k3.setStyleSheet("color:#555; font-weight:bold;")
-        ef.addRow(k3, self.combo_status)
+        self.combo_status.setFixedHeight(44)
+        meta_row.addWidget(self._field_block("状态", self.combo_status, "同步时写入 Redmine 状态"), 1)
+        edit_layout.addLayout(meta_row)
+        edit_layout.addStretch()
+        top.addWidget(edit_panel, 1)
 
-        root.addWidget(edit_card)
+        body.addLayout(top)
 
-        # ── 将更新字段说明 ────────────────────────────────────────────────────
+        bottom = QHBoxLayout()
+        bottom.setSpacing(16)
+
+        updates_panel, updates_layout = self._panel(
+            "即将更新的字段",
+            "同步后会覆盖以下 Redmine 内容。",
+            badge="写入")
         tags = ["状态", "完成度→100%", "解决者", "修复情况",
                 "问题根源", "修复方案", "自测情况", "建议", "查找问题的思路"]
         tag_html = " ".join(
-            f'<span style="background:#e3f2fd;color:#1565c0;border-radius:3px;'
-            f'padding:2px 6px;font-size:9pt;">{t}</span>' for t in tags)
-        note = QLabel(f"将更新: {tag_html}")
+            f'<span style="background:#e3f2fd;color:#1565c0;border-radius:9px;'
+            f'padding:4px 10px;font-size:9pt;">{t}</span>' for t in tags)
+        note = QLabel(tag_html)
         note.setWordWrap(True)
         note.setTextFormat(Qt.RichText)
-        root.addWidget(note)
+        updates_layout.addWidget(note)
 
-        sep = QFrame(); sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("background:#e0e0e0; max-height:1px;")
-        root.addWidget(sep)
+        updates_info = QLabel("工时会优先写入名称包含“工时”的自定义字段，无匹配时回退到 time_entries。")
+        updates_info.setObjectName("MetaText")
+        updates_info.setWordWrap(True)
+        updates_layout.addWidget(updates_info)
+        bottom.addWidget(updates_panel, 1)
 
-        # ── 状态标签 ──────────────────────────────────────────────────────────
-        self.status_lbl = QLabel("")
-        self.status_lbl.setAlignment(Qt.AlignCenter)
-        self.status_lbl.setMinimumHeight(28)
-        self.status_lbl.setStyleSheet("font-size:10pt;")
-        root.addWidget(self.status_lbl)
+        feedback_panel, feedback_layout = self._panel(
+            "同步反馈",
+            "点击“立即同步”后在这里查看进度与异常详情。",
+            badge="待同步",
+            badge_style=('#dbeafe', '#1d4ed8'))
+        self.status_pill = feedback_layout.itemAt(0).layout().itemAt(1).widget()
 
-        # ── 按钮行 ────────────────────────────────────────────────────────────
-        brow = QHBoxLayout(); brow.setSpacing(10)
-        self.btn_yes = self._mkbtn("是，立即同步", '#4CAF50', self._start_sync)
-        self.btn_no  = self._mkbtn("否，跳过",     '#9e9e9e', self.reject)
-        brow.addWidget(self.btn_yes)
-        brow.addWidget(self.btn_no)
-        root.addLayout(brow)
+        self.status_lbl = QLabel("等待确认。")
+        self.status_lbl.setObjectName("StatusText")
+        self.status_lbl.setWordWrap(True)
+        self.status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        feedback_layout.addWidget(self.status_lbl)
 
-        # ── 底部小链接 ────────────────────────────────────────────────────────
-        cfg_lnk = QLabel('<a href="s" style="color:#bbb;font-size:8pt;">重新配置账号</a>')
-        cfg_lnk.setAlignment(Qt.AlignRight)
-        cfg_lnk.linkActivated.connect(lambda _: self._reconfig())
-        root.addWidget(cfg_lnk)
+        self.error_detail = QPlainTextEdit()
+        self.error_detail.setObjectName("ErrorDetail")
+        self.error_detail.setReadOnly(True)
+        self.error_detail.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.error_detail.setMaximumHeight(0)
+        self.error_detail.hide()
+        feedback_layout.addWidget(self.error_detail)
+        bottom.addWidget(feedback_panel, 1)
 
-    @staticmethod
-    def _mkbtn(text, color, slot):
-        b = QPushButton(text)
-        b.setFixedHeight(42)
-        b.setCursor(Qt.PointingHandCursor)
-        b.setStyleSheet(
-            f"QPushButton{{background:{color};color:white;border:none;"
-            f"border-radius:5px;font-size:11pt;font-weight:bold;}}"
-            f"QPushButton:hover{{opacity:0.85;}}"
-            f"QPushButton:disabled{{background:#bdbdbd;color:#888;}}")
-        b.clicked.connect(slot)
-        return b
+        body.addLayout(bottom)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        actions.addWidget(self._mkbtn("重新配置账号", "LinkButton", self._reconfig))
+        actions.addStretch()
+        self.btn_no = self._mkbtn("暂不处理", "SecondaryButton", self.reject)
+        self.btn_yes = self._mkbtn("立即同步", "PrimaryButton", self._start_sync)
+        actions.addWidget(self.btn_no)
+        actions.addWidget(self.btn_yes)
+        body.addLayout(actions)
+
+        self._set_status("等待用户确认同步。", state='idle')
 
     def _reconfig(self):
         logger.info("用户打开重新配置账号窗口")
         dlg = SetupDialog(existing=self.config, parent=self)
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.config
+            self.config_changed = True
             logger.info("同步窗口中的账号配置已更新")
 
     def _start_sync(self):
+        self.btn_yes.setText("立即同步")
         self.btn_yes.setEnabled(False)
         self.btn_no.setEnabled(False)
-        self._set_status("同步中...", "#2196F3")
+        self.error_detail.clear()
+        self._toggle_error_detail(False)
+        self._set_status("同步中...", state='running')
 
         # 读取用户手动编辑的值
-        comment_val = self.edit_comment.text().strip() or PLACEHOLDER
+        comment_val = self.edit_comment.toPlainText().strip() or PLACEHOLDER
         self.fields['Comment'] = comment_val
 
         hours_text = self.edit_hours.text().strip()
@@ -853,29 +1353,48 @@ class SyncDialog(QDialog):
 
         self.worker = SyncWorker(self.config, self.fields, self.gerrit_url,
                                  hours=hours, status_name=status_name)
-        self.worker.log_sig.connect(lambda m: self._set_status(m, "#2196F3"))
+        self.worker.log_sig.connect(lambda m: self._set_status(m, state='running'))
         self.worker.finished_sig.connect(self._on_done)
         self.worker.start()
 
     def _on_done(self, ok, msg):
         if ok:
+            self.error_detail.clear()
+            self._toggle_error_detail(False)
             logger.info("同步结果成功: %s", msg)
-            self._set_status(f"✓  {msg}", "#4CAF50")
-            self.btn_no.setText("关 闭")
+            self._set_status(f"✓  {msg}", state='success')
+            self.btn_no.setText("关闭")
             self.btn_no.setEnabled(True)
-            self.btn_no.setStyleSheet(
-                "QPushButton{background:#2196F3;color:white;border:none;"
-                "border-radius:5px;font-size:11pt;font-weight:bold;}")
         else:
+            self.error_detail.setPlainText(msg)
+            self._toggle_error_detail(True)
             logger.warning("同步结果失败: %s", msg)
-            self._set_status(f"✗  {msg}", "#f44336")
-            self.btn_yes.setText("重 试")
+            self._set_status("✗  同步失败，详细错误见下方", state='error')
+            self.btn_yes.setText("重试")
             self.btn_yes.setEnabled(True)
             self.btn_no.setEnabled(True)
+        self.adjustSize()
 
-    def _set_status(self, text, color):
-        self.status_lbl.setStyleSheet(f"font-size:10pt; color:{color};")
+    def _toggle_error_detail(self, visible):
+        if visible:
+            self.error_detail.show()
+            self.error_detail.setMaximumHeight(0)
+
+        self._error_anim = QPropertyAnimation(self.error_detail, b"maximumHeight", self)
+        self._error_anim.setDuration(180)
+        self._error_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._error_anim.setStartValue(self.error_detail.maximumHeight())
+        self._error_anim.setEndValue(140 if visible else 0)
+        if not visible:
+            self._error_anim.finished.connect(self.error_detail.hide)
+        self._error_anim.start()
+
+    def _set_status(self, text, state='idle'):
+        style = self.STATUS_STYLES.get(state, self.STATUS_STYLES['idle'])
         self.status_lbl.setText(text)
+        self.status_lbl.setStyleSheet(
+            f"color:{style['text_color']}; font-size:10pt; line-height:1.45em;")
+        tint_badge(self.status_pill, *style['badge'])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -972,11 +1491,12 @@ class SyncRedmineApp:
         logger.info("检测到新提交: issue=%s topics=%s", issue_number, topics)
 
         # 取消旧的轮询
-        if self._poller and self._poller.isRunning():
-            self._poller.cancel()
+        if self._poller:
+            if self._poller.isRunning():
+                self._poller.cancel()
+            self._poller = None
 
         trigger_time = datetime.fromtimestamp(log_mtime, tz=timezone.utc)
-        initial_changes = fetch_gerrit_changes(self.config, topics, timeout=2)
 
         # 启动新的 Gerrit 轮询
         self.tray.setIcon(make_icon('#FF9800'))  # 橙色
@@ -986,18 +1506,28 @@ class SyncRedmineApp:
             f"检测到新提交 Issue #{issue_number}，等待 push 到 Gerrit...",
             QSystemTrayIcon.Information, 3000)
 
-        self._poller = GerritPoller(
+        poller = GerritPoller(
             self.config, topics,
             trigger_time=trigger_time,
-            initial_changes=initial_changes)
-        self._poller.push_detected.connect(
-            lambda url: self._on_push_detected(fields, url))
-        self._poller.status_msg.connect(
-            lambda m: self.tray.setToolTip(f"syncRedmine — {m}"))
-        self._poller.timed_out.connect(self._on_poll_timeout)
-        self._poller.start()
+            initial_changes=None)
+        poller.finished.connect(poller.deleteLater)
+        poller.push_detected.connect(
+            lambda url, p=poller, f=fields: self._on_push_detected(p, f, url))
+        poller.status_msg.connect(
+            lambda m, p=poller: self._on_poller_status(p, m))
+        poller.timed_out.connect(lambda p=poller: self._on_poll_timeout(p))
+        self._poller = poller
+        poller.start()
 
-    def _on_push_detected(self, fields, gerrit_url):
+    def _on_poller_status(self, poller, message):
+        if self._poller is poller:
+            self.tray.setToolTip(f"syncRedmine — {message}")
+
+    def _on_push_detected(self, poller, fields, gerrit_url):
+        if self._poller is not poller:
+            logger.info("忽略过期 poller 的 push 通知: gerrit=%s", gerrit_url)
+            return
+        self._poller = None
         logger.info("检测到 push 完成: issue=%s gerrit=%s",
                     fields.get('Bug number', ''), gerrit_url)
         self.tray.setIcon(make_icon('#4CAF50', badge='!'))  # 绿色+感叹号
@@ -1008,7 +1538,11 @@ class SyncRedmineApp:
             QSystemTrayIcon.Information, 5000)
         QTimer.singleShot(500, lambda: self._show_sync(fields, gerrit_url))
 
-    def _on_poll_timeout(self):
+    def _on_poll_timeout(self, poller):
+        if self._poller is not poller:
+            logger.info("忽略过期 poller 的超时信号")
+            return
+        self._poller = None
         logger.warning("本次 Gerrit 轮询超时，恢复空闲状态")
         self.tray.setIcon(make_icon())
         self.tray.setToolTip(self.TOOLTIP_IDLE)
@@ -1021,7 +1555,9 @@ class SyncRedmineApp:
                 return
         dlg = SyncDialog(self.config, fields, gerrit_url)
         dlg.exec_()
-        self.config = dlg.config
+        if dlg.config_changed:
+            self.config = dlg.config
+            logger.info("同步对话框关闭后，主应用配置已同步更新")
         self.tray.setIcon(make_icon())
         self.tray.setToolTip(self.TOOLTIP_IDLE)
 
@@ -1051,6 +1587,8 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     app.setApplicationName("syncRedmine")
+    app.setWindowIcon(make_icon())
+    app.setStyleSheet(APP_STYLE_SHEET)
 
     if '--setup' in sys.argv:
         SetupDialog(existing=load_config()).exec_()
@@ -1060,7 +1598,7 @@ def main():
         QMessageBox.critical(None, "错误", "系统不支持托盘图标")
         sys.exit(1)
 
-    instance = SyncRedmineApp(app)  # 必须保持引用，防止 GC 回收
+    app._sync_redmine = SyncRedmineApp(app)  # 保持引用，防止 GC 回收
     sys.exit(app.exec_())
 
 
