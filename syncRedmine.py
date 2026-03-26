@@ -1414,6 +1414,8 @@ class SyncRedmineApp:
         self.app      = app
         self.config   = load_config()
         self._poller  = None
+        self._setup_dialog = None
+        self._first_run_pending = not bool(self.config)
         self.app.setQuitOnLastWindowClosed(False)
         logger.info("syncRedmine 启动，当前配置状态: %s", "已加载" if self.config else "未配置")
 
@@ -1438,7 +1440,7 @@ class SyncRedmineApp:
         self._last_mtime = self._get_mtime()         # 记录初始 mtime 防止启动误触
 
         # ── 首次运行引导 ──────────────────────────────────────────────────────
-        if not self.config:
+        if self._first_run_pending:
             QTimer.singleShot(600, self._first_run)
 
     # ── inotify 事件处理 ──────────────────────────────────────────────────────
@@ -1552,6 +1554,16 @@ class SyncRedmineApp:
         self.tray.setIcon(make_icon())
         self.tray.setToolTip(self.TOOLTIP_IDLE)
 
+    @staticmethod
+    def _focus_dialog(dialog):
+        if dialog is None:
+            return
+        if dialog.windowState() & Qt.WindowMinimized:
+            dialog.setWindowState((dialog.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     # ── 同步对话框 ────────────────────────────────────────────────────────────
     def _show_sync(self, fields, gerrit_url):
         if not self.config:
@@ -1568,13 +1580,34 @@ class SyncRedmineApp:
 
     # ── 配置 ──────────────────────────────────────────────────────────────────
     def _show_setup(self):
+        self._first_run_pending = False
+        if self._setup_dialog is not None:
+            logger.info("配置账号窗口已存在，切换到前台")
+            self._focus_dialog(self._setup_dialog)
+            return
+
         logger.info("用户打开配置账号窗口")
         dlg = SetupDialog(existing=self.config)
-        if dlg.exec_() == QDialog.Accepted:
-            self.config = dlg.config
-            logger.info("主窗口账号配置已更新")
+        self._setup_dialog = dlg
+        try:
+            if dlg.exec_() == QDialog.Accepted:
+                self.config = dlg.config
+                logger.info("主窗口账号配置已更新")
+        finally:
+            if self._setup_dialog is dlg:
+                self._setup_dialog = None
+            dlg.deleteLater()
 
     def _first_run(self):
+        if not self._first_run_pending or self.config:
+            return
+        self._first_run_pending = False
+
+        if self._setup_dialog is not None:
+            logger.info("首次运行引导触发时配置窗口已打开，切换到前台")
+            self._focus_dialog(self._setup_dialog)
+            return
+
         logger.info("首次运行，弹出引导配置")
         QMessageBox.information(
             None, "欢迎使用 syncRedmine",
