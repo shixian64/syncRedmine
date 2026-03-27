@@ -16,6 +16,7 @@ syncRedmine - 独立后台程序
 
 import sys, os, re, json, base64, time, glob, logging
 import urllib.request, urllib.parse, urllib.error
+from html import unescape
 from datetime import datetime, timedelta, timezone
 from logging.handlers import TimedRotatingFileHandler
 
@@ -511,6 +512,115 @@ def build_gerrit_change_url(base, change_number, change_info=None):
     return f"{base}/c/+/{change_number}"
 
 
+def _strip_html_tags(text):
+    return re.sub(r'<[^>]+>', '', text or '')
+
+
+def parse_solver_options_from_issue_html(html):
+    """从 Redmine issue/edit 页面中解析“解决者”下拉候选项。"""
+    label_match = re.search(
+        r'<label[^>]+for="(?P<select_id>issue_custom_field_values_\d+)"[^>]*>'
+        r'\s*(?:<span[^>]*>)?\s*解决者\s*(?:</span>)?\s*</label>',
+        html or '', re.IGNORECASE | re.DOTALL)
+    if not label_match:
+        return []
+
+    select_id = label_match.group('select_id')
+    select_match = re.search(
+        rf'<select[^>]*id="{re.escape(select_id)}"[^>]*>(?P<options>.*?)</select>',
+        html or '', re.IGNORECASE | re.DOTALL)
+    if not select_match:
+        return []
+
+    options = []
+    seen_ids = set()
+    for option_match in re.finditer(
+            r'<option(?P<attrs>[^>]*)value="(?P<value>[^"]*)"[^>]*>(?P<label>.*?)</option>',
+            select_match.group('options'), re.IGNORECASE | re.DOTALL):
+        user_id = unescape(option_match.group('value')).strip()
+        if not user_id or user_id in seen_ids:
+            continue
+        label = unescape(_strip_html_tags(option_match.group('label'))).replace('\xa0', ' ').strip()
+        if not label:
+            label = f"用户 {user_id}"
+        options.append({
+            'id': user_id,
+            'label': label,
+            'selected': 'selected' in option_match.group('attrs').lower(),
+        })
+        seen_ids.add(user_id)
+    return options
+
+
+def fetch_redmine_solver_choices(config, issue_id, timeout=10):
+    """获取当前登录用户与“解决者”候选列表。"""
+    auth = (config['redmine_username'], config['redmine_password'])
+    base = config['redmine_url'].rstrip('/')
+    result = {
+        'current_user_id': None,
+        'current_user_label': '',
+        'options': [],
+    }
+
+    try:
+        resp = requests.get(f'{base}/my/account.json', auth=auth, timeout=timeout)
+        if resp.status_code == 200:
+            user = resp.json().get('user', {})
+            user_id = user.get('id')
+            if user_id is not None:
+                result['current_user_id'] = str(user_id)
+            first = (user.get('firstname') or '').strip()
+            last = (user.get('lastname') or '').strip()
+            login = (user.get('login') or '').strip()
+            display_name = ''.join(part for part in [last, first] if part) or login
+            if login and display_name and login not in display_name:
+                result['current_user_label'] = f"{login}{display_name}"
+            else:
+                result['current_user_label'] = display_name or login or (f"用户 {user_id}" if user_id else '')
+    except Exception as e:
+        logger.warning("获取当前 Redmine 用户失败: %s", e)
+
+    issue_paths = [f'/issues/{issue_id}/edit', f'/issues/{issue_id}']
+    for path in issue_paths:
+        try:
+            resp = requests.get(f'{base}{path}', auth=auth, timeout=timeout)
+            if resp.status_code != 200:
+                continue
+            options = parse_solver_options_from_issue_html(resp.text)
+            if options:
+                result['options'] = options
+                break
+        except Exception as e:
+            logger.warning("解析 Redmine 解决者候选失败 path=%s: %s", path, e)
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 解决者候选异步加载线程
+# ═══════════════════════════════════════════════════════════════════════════════
+class SolverChoicesLoader(QThread):
+    loaded_sig = pyqtSignal(int, object)
+
+    def __init__(self, config, issue_id, request_id, parent=None):
+        super().__init__(parent)
+        self.config = dict(config or {})
+        self.issue_id = issue_id
+        self.request_id = request_id
+
+    def run(self):
+        try:
+            result = fetch_redmine_solver_choices(self.config, self.issue_id)
+        except Exception as e:
+            logger.warning("异步加载解决者候选失败: issue=%s err=%s", self.issue_id, e)
+            result = {
+                'current_user_id': None,
+                'current_user_label': '',
+                'options': [],
+            }
+        self.loaded_sig.emit(self.request_id, result)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # UI 基础
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -751,13 +861,15 @@ class SyncWorker(QThread):
     log_sig      = pyqtSignal(str)
     finished_sig = pyqtSignal(bool, str)
 
-    def __init__(self, config, fields, gerrit_url, hours=0.5, status_name='OnGoing'):
+    def __init__(self, config, fields, gerrit_url, hours=0.5, status_name='OnGoing',
+                 solver_user_id=None):
         super().__init__()
         self.config      = config
         self.fields      = fields
         self.gerrit_url  = gerrit_url
         self.hours       = hours
         self.status_name = status_name
+        self.solver_user_id = str(solver_user_id) if solver_user_id else None
         self.auth       = (config['redmine_username'], config['redmine_password'])
         self.base       = config['redmine_url'].rstrip('/')
 
@@ -794,6 +906,8 @@ class SyncWorker(QThread):
             self.log_sig.emit("获取用户信息...")
             r2   = self._get('/my/account.json')
             uid  = r2.json()['user']['id'] if r2.status_code == 200 else None
+            default_solver_uid = str(uid) if uid is not None else None
+            solver_uid = self.solver_user_id or default_solver_uid
 
             self.log_sig.emit("获取状态列表...")
             r3 = self._get('/issue_statuses.json')
@@ -816,11 +930,13 @@ class SyncWorker(QThread):
                     cfs.append({'id': cf_map[rf_name], 'value': val})
             # 解决者 —— 优先自定义字段，其次 assigned_to_id
             solver_field_id = cf_map.get(SOLVER_FIELD_NAME)
-            if uid and solver_field_id:
-                cfs.append({'id': solver_field_id, 'value': str(uid)})
-                self.log_sig.emit("solver -> custom_field (uid=%s)" % uid)
-            elif uid:
-                self.log_sig.emit("solver -> assigned_to_id (uid=%s)" % uid)
+            if solver_uid and solver_field_id:
+                cfs.append({'id': solver_field_id, 'value': solver_uid})
+                source = "manual" if self.solver_user_id else "default"
+                self.log_sig.emit("solver -> custom_field (uid=%s source=%s)" % (solver_uid, source))
+            elif solver_uid:
+                source = "manual" if self.solver_user_id else "default"
+                self.log_sig.emit("solver -> assigned_to_id (uid=%s source=%s)" % (solver_uid, source))
 
             # 工时 —— 优先查找名称含"工时"的自定义字段
             hours_field_id = None
@@ -835,8 +951,8 @@ class SyncWorker(QThread):
             if target_status_id:
                 update['status_id'] = target_status_id
             # 若解决者不在自定义字段，走 assigned_to_id
-            if uid and not solver_field_id:
-                update['assigned_to_id'] = uid
+            if solver_uid and not solver_field_id:
+                update['assigned_to_id'] = int(solver_uid) if str(solver_uid).isdigit() else solver_uid
             if cfs:
                 update['custom_fields'] = cfs
 
@@ -1086,6 +1202,11 @@ class SyncDialog(AnimatedDialog):
         self.worker     = None
         self._error_anim = None
         self.config_changed = False
+        self.solver_choices = []
+        self.default_solver_id = None
+        self._solver_loader = None
+        self._solver_request_id = 0
+        self._solver_load_started = False
         self.issue_number = extract_first_number(self.fields.get('Bug number', '')) or (
             self.fields.get('Bug number', '').strip() or '-')
         self.setWindowTitle("syncRedmine — 同步提交信息到 Redmine")
@@ -1093,6 +1214,12 @@ class SyncDialog(AnimatedDialog):
         self.setFixedWidth(920)
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self._build()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._solver_load_started:
+            self._solver_load_started = True
+            QTimer.singleShot(0, self._load_solver_choices_async)
 
     @staticmethod
     def _panel(title, subtitle, badge=None, badge_style=None):
@@ -1261,6 +1388,13 @@ class SyncDialog(AnimatedDialog):
         self.combo_status.setFixedHeight(44)
         meta_row.addWidget(self._field_block("状态", self.combo_status, "同步时写入 Redmine 状态"), 1)
         edit_layout.addLayout(meta_row)
+
+        self.combo_solver = QComboBox()
+        self.combo_solver.setFixedHeight(44)
+        self.combo_solver.setEnabled(False)
+        self.combo_solver.addItem("正在加载解决者...", None)
+        edit_layout.addWidget(self._field_block(
+            "解决者", self.combo_solver, "默认使用当前登录 Redmine 用户，也可手动改选。"))
         edit_layout.addStretch()
         top.addWidget(edit_panel, 1)
 
@@ -1332,6 +1466,78 @@ class SyncDialog(AnimatedDialog):
             self.config = dlg.config
             self.config_changed = True
             logger.info("同步窗口中的账号配置已更新")
+            self._load_solver_choices_async()
+
+    def _set_solver_loading_state(self, text):
+        self.combo_solver.blockSignals(True)
+        self.combo_solver.clear()
+        self.combo_solver.addItem(text, None)
+        self.combo_solver.setEnabled(False)
+        self.combo_solver.blockSignals(False)
+
+    def _load_solver_choices_async(self):
+        self._set_solver_loading_state("正在加载解决者...")
+
+        issue_id = extract_first_number(self.fields.get('Bug number', ''))
+        if not issue_id:
+            self._set_solver_loading_state("无法识别 Issue，提交时使用当前登录者")
+            return
+
+        self._solver_request_id += 1
+        request_id = self._solver_request_id
+        loader = SolverChoicesLoader(
+            self.config, issue_id, request_id,
+            parent=QApplication.instance())
+        loader.loaded_sig.connect(self._on_solver_choices_loaded)
+        loader.finished.connect(lambda l=loader: self._on_solver_loader_finished(l))
+        self._solver_loader = loader
+        loader.start()
+
+    def _on_solver_loader_finished(self, loader):
+        if self._solver_loader is loader:
+            self._solver_loader = None
+
+    def _on_solver_choices_loaded(self, request_id, info):
+        if request_id != self._solver_request_id:
+            logger.info("忽略过期的解决者候选结果: request_id=%s", request_id)
+            return
+
+        current_user_id = info.get('current_user_id')
+        current_user_label = info.get('current_user_label') or "当前登录者"
+        options = info.get('options') or []
+        self.solver_choices = options
+        self.default_solver_id = current_user_id
+
+        self.combo_solver.blockSignals(True)
+        self.combo_solver.clear()
+
+        if options:
+            current_index = -1
+            for idx, opt in enumerate(options):
+                self.combo_solver.addItem(opt['label'], opt['id'])
+                if current_user_id and str(opt['id']) == str(current_user_id):
+                    current_index = idx
+
+            if current_index >= 0:
+                self.combo_solver.setCurrentIndex(current_index)
+                self.combo_solver.setEnabled(True)
+            elif current_user_id:
+                self.combo_solver.insertItem(0, f"{current_user_label}（当前登录者）", current_user_id)
+                self.combo_solver.setCurrentIndex(0)
+                self.combo_solver.setEnabled(True)
+            else:
+                self.combo_solver.insertItem(0, "默认使用当前登录者，也可手动改选", None)
+                self.combo_solver.setCurrentIndex(0)
+                self.combo_solver.setEnabled(True)
+        elif current_user_id:
+            self.combo_solver.addItem(f"{current_user_label}（当前登录者）", current_user_id)
+            self.combo_solver.setCurrentIndex(0)
+            self.combo_solver.setEnabled(False)
+        else:
+            self.combo_solver.addItem("无法加载解决者列表，提交时尝试使用当前登录者", None)
+            self.combo_solver.setEnabled(False)
+
+        self.combo_solver.blockSignals(False)
 
     def _start_sync(self):
         self.btn_yes.setText("立即同步")
@@ -1353,11 +1559,13 @@ class SyncDialog(AnimatedDialog):
             hours = 0.5
 
         status_name = self.combo_status.currentText()
+        solver_user_id = self.combo_solver.currentData()
         logger.info("用户确认同步: issue=%s status=%s hours=%s",
                     self.fields.get('Bug number', ''), status_name, hours)
 
         self.worker = SyncWorker(self.config, self.fields, self.gerrit_url,
-                                 hours=hours, status_name=status_name)
+                                 hours=hours, status_name=status_name,
+                                 solver_user_id=solver_user_id)
         self.worker.log_sig.connect(lambda m: self._set_status(m, state='running'))
         self.worker.finished_sig.connect(self._on_done)
         self.worker.start()
