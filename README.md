@@ -42,7 +42,7 @@ commit 工具 ──→ 写入 ~/commit_data.log ──→ git push
 
 - Ubuntu 桌面系统（需要系统托盘支持）
 - Python 3.6+
-- PyQt5、requests
+- PyQt5、requests、paramiko
 
 ### 安装步骤
 
@@ -54,7 +54,7 @@ chmod +x install.sh
 
 安装脚本会：
 1. 自动检查 `pip` 版本，必要时先升级用户侧 `pip`
-2. 安装 Python 依赖（`requests`、`PyQt5`，优先使用二进制 wheel）
+2. 安装 Python 依赖（`requests`、`PyQt5`、`paramiko`，优先使用二进制 wheel）
 3. 复制程序到 `~/.local/share/syncRedmine/`
 4. 创建开机自启动配置（`~/.config/autostart/syncRedmine.desktop`）
 5. 询问是否立即启动
@@ -63,10 +63,11 @@ chmod +x install.sh
 
 ### 首次启动
 
-首次启动会弹出账号配置窗口，需填写：
+首次启动会弹出设置窗口，需填写：
 
 - **Gerrit**：服务器地址、用户名、密码（用于 REST API 检测 push）
 - **Redmine**：服务器地址、用户名、密码（用于同步问题字段）
+- **自动更新**：默认开启，可配置源机器 IP、SSH 端口、SSH 用户名/密码、远端 `syncRedmine.py` 路径；程序会每天 **10:00** 自动检查并在发现新版本后重启
 
 配置保存在 `~/.commit_tool/sync_config.json`（密码 base64 编码）。
 
@@ -79,7 +80,7 @@ chmod +x install.sh
 1. 正常使用 commit 工具提交代码
 2. push 完成后 syncRedmine 自动弹出确认框
 3. 在弹窗中确认或补充 **查找问题的思路 / 工时 / 状态**
-4. 点击 **「是，立即同步」**
+4. 点击 **「立即同步」**
 5. 同步结果即时显示
 
 ### 托盘图标状态
@@ -92,7 +93,7 @@ chmod +x install.sh
 
 ### 右键菜单
 
-- **配置账号**：重新修改 Gerrit / Redmine 的账号密码
+- **设置**：修改 Gerrit / Redmine 账号，以及自动更新配置
 - **退出**：关闭程序
 
 ### 命令行
@@ -101,7 +102,7 @@ chmod +x install.sh
 # 启动程序（常驻托盘）
 python3 ~/.local/share/syncRedmine/syncRedmine.py &
 
-# 仅打开账号配置
+# 仅打开设置
 python3 ~/.local/share/syncRedmine/syncRedmine.py --setup
 ```
 
@@ -143,6 +144,6 @@ syncRedmine/
 |---|---|
 | `~/.local/share/syncRedmine/syncRedmine.py` | 安装后的程序 |
 | `~/.config/autostart/syncRedmine.desktop` | 开机自启动配置 |
-| `~/.commit_tool/sync_config.json` | 账号配置（密码 base64 编码） |
+| `~/.commit_tool/sync_config.json` | 设置配置（密码 base64 编码） |
 | `~/commit_data.log` | commit 工具写入的提交日志（只读监控） |
 | `~/.local/share/syncRedmine/logs/syncRedmine.log` | 运行日志（按天滚动，保留 3 天） |

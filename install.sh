@@ -84,15 +84,17 @@ echo "  日志策略: 按天滚动，保留最近 3 天"
 echo "  自启动:   $DESKTOP_FILE"
 echo ""
 echo "  立即启动: python3 $INSTALL_DIR/syncRedmine.py &"
-echo "  配置账号: python3 $INSTALL_DIR/syncRedmine.py --setup"
+echo "  打开设置: python3 $INSTALL_DIR/syncRedmine.py --setup"
 echo ""
-echo "  首次启动后请配置 Gerrit 和 Redmine 账号。"
+echo "  首次启动后请先完成设置。"
 echo ""
 
-# 询问是否立即启动
-read -p "是否立即启动 syncRedmine？[Y/n] " ans
-ans=${ans:-Y}
-if [[ "${ans,,}" == "y" ]]; then
-    python3 "$INSTALL_DIR/syncRedmine.py" &
-    echo "  syncRedmine 已在后台启动，请查看系统托盘图标。"
+# 询问是否立即启动（AUTO_INSTALL=1 时跳过，由调用方负责重启）
+if [[ -z "${AUTO_INSTALL:-}" ]]; then
+    read -p "是否立即启动 syncRedmine？[Y/n] " ans
+    ans=${ans:-Y}
+    if [[ "${ans,,}" == "y" ]]; then
+        python3 "$INSTALL_DIR/syncRedmine.py" &
+        echo "  syncRedmine 已在后台启动，请查看系统托盘图标。"
+    fi
 fi

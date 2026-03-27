@@ -14,7 +14,7 @@ syncRedmine - 独立后台程序
 配置: python3 syncRedmine.py --setup
 """
 
-import sys, os, re, json, base64, time, glob, logging
+import sys, os, re, json, base64, time, glob, logging, subprocess, socket, ipaddress, tempfile, shutil
 import urllib.request, urllib.parse, urllib.error
 from html import unescape
 from datetime import datetime, timedelta, timezone
@@ -31,7 +31,7 @@ from PyQt5.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QGroupBox, QFormLayout, QMessageBox,
     QFrame, QSystemTrayIcon, QMenu, QComboBox, QPlainTextEdit,
-    QGraphicsDropShadowEffect,
+    QGraphicsDropShadowEffect, QCheckBox, QScrollArea, QWidget,
 )
 from PyQt5.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QFileSystemWatcher,
@@ -56,6 +56,112 @@ POLL_INTERVAL   = 4          # 轮询间隔 (秒)
 POLL_TIMEOUT    = 180        # 最长等待 push 时间 (秒)
 RECENT_PUSH_SLACK = 8        # Gerrit 时间与本机时间允许偏差 (秒)
 LOG_RETENTION_DAYS = 3       # 最多保留最近 3 个日志文件（通常对应当天 + 前 2 天）
+AUTO_UPDATE_HOUR  = 10
+AUTO_UPDATE_MINUTE = 0
+AUTO_UPDATE_DEFAULT_USERNAME = 'hmt'
+AUTO_UPDATE_DEFAULT_PASSWORD = '123456'
+AUTO_UPDATE_DEFAULT_REPO_PATH = os.path.dirname(os.path.abspath(__file__))
+
+
+BENCHMARK_NET = ipaddress.ip_network('198.18.0.0/15')
+PREFERRED_IFACE_PREFIXES = ('en', 'eth', 'wl', 'ww')
+VIRTUAL_IFACE_PREFIXES = (
+    'lo', 'docker', 'br-', 'veth', 'virbr', 'tun', 'tap', 'wg',
+    'tailscale', 'zt', 'mihomo', 'clash',
+)
+
+
+def _get_default_ipv4_iface():
+    try:
+        output = subprocess.check_output(
+            ['ip', '-4', 'route', 'show', 'default'],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+    for line in output.splitlines():
+        parts = line.split()
+        if 'dev' in parts:
+            idx = parts.index('dev')
+            if idx + 1 < len(parts):
+                return parts[idx + 1]
+    return ''
+
+
+def _iter_ipv4_candidates():
+    try:
+        output = subprocess.check_output(
+            ['ip', '-4', '-o', 'addr', 'show', 'up', 'scope', 'global'],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        output = ''
+
+    seen = set()
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[2] != 'inet':
+            continue
+        iface = parts[1]
+        ip = parts[3].split('/', 1)[0]
+        key = (iface, ip)
+        if key not in seen:
+            seen.add(key)
+            yield iface, ip
+
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            key = ('', ip)
+            if key not in seen:
+                seen.add(key)
+                yield '', ip
+    except OSError:
+        return
+
+
+def _ipv4_priority(iface, ip, default_iface):
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except ipaddress.AddressValueError:
+        return -10_000
+
+    if addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified:
+        return -10_000
+
+    iface_name = (iface or '').lower()
+    score = 0
+
+    if iface and default_iface and iface == default_iface:
+        score += 40
+    if iface_name.startswith(PREFERRED_IFACE_PREFIXES):
+        score += 80
+    if iface and not iface_name.startswith(VIRTUAL_IFACE_PREFIXES):
+        score += 30
+    if addr.is_private and addr not in BENCHMARK_NET:
+        score += 20
+    if addr in BENCHMARK_NET:
+        score -= 100
+    if not iface:
+        score -= 5
+
+    return score
+
+
+def detect_local_ipv4():
+    default_iface = _get_default_ipv4_iface()
+    candidates = list(_iter_ipv4_candidates())
+    if not candidates:
+        return ''
+
+    _, ip = max(candidates, key=lambda item: _ipv4_priority(item[0], item[1], default_iface))
+    return ip
+
+
+LOCAL_MACHINE_IP = detect_local_ipv4()
 
 # commit_data.log 字段 → Redmine 自定义字段名
 FIELD_MAP = {
@@ -91,6 +197,11 @@ QFrame#InfoStrip {
     background: #f7faff;
     border: 1px solid #dbe7ff;
     border-radius: 16px;
+}
+QFrame#FieldReveal {
+    background: transparent;
+    border: none;
+    border-left: 2px solid #dbe7ff;
 }
 QFrame#Divider {
     background: #e8eef5;
@@ -132,6 +243,16 @@ QLabel#FieldCaption {
 QLabel#FieldHint {
     color: #94a3b8;
     font-size: 8.8pt;
+}
+QLabel#InlineState {
+    color: #1d4ed8;
+    font-size: 9.1pt;
+    font-weight: 700;
+}
+QLabel#InlineSummary {
+    color: #64748b;
+    font-size: 9pt;
+    line-height: 1.45em;
 }
 QLabel#ValueText {
     color: #0f172a;
@@ -191,6 +312,23 @@ QPushButton#SecondaryButton {
 }
 QPushButton#SecondaryButton:hover {
     background: #dbe1ea;
+}
+QPushButton#GhostButton {
+    min-height: 36px;
+    padding: 0 14px;
+    border-radius: 12px;
+    border: 1px solid #d7e5ff;
+    background: #f8fbff;
+    color: #1d4ed8;
+    font-size: 9.6pt;
+    font-weight: 600;
+}
+QPushButton#GhostButton:hover {
+    background: #eef4ff;
+    border: 1px solid #bfd3ff;
+}
+QPushButton#GhostButton:pressed {
+    background: #e0ecff;
 }
 QPushButton#LinkButton {
     min-height: 30px;
@@ -297,9 +435,22 @@ def load_config():
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             d = json.load(f)
-        for k in ('gerrit_password', 'redmine_password'):
+        for k in ('gerrit_password', 'redmine_password', 'update_password'):
             if d.get(k):
                 d[k] = base64.b64decode(d[k]).decode('utf-8')
+        if 'auto_update_enabled' not in d:
+            d['auto_update_enabled'] = True
+        if not d.get('update_host') and LOCAL_MACHINE_IP:
+            d['update_host'] = LOCAL_MACHINE_IP
+        if not d.get('update_username'):
+            d['update_username'] = AUTO_UPDATE_DEFAULT_USERNAME
+        if not d.get('update_password'):
+            d['update_password'] = AUTO_UPDATE_DEFAULT_PASSWORD
+        # 迁移旧字段：update_remote_path（单文件路径）→ update_repo_path（仓库目录）
+        if not d.get('update_repo_path'):
+            old = d.pop('update_remote_path', '') or ''
+            d['update_repo_path'] = os.path.dirname(old) if old.endswith('.py') else (old or AUTO_UPDATE_DEFAULT_REPO_PATH)
+        d['update_port'] = str(d.get('update_port', '22') or '22')
         return d
     except Exception:
         return None
@@ -307,7 +458,7 @@ def load_config():
 def save_config(cfg):
     os.makedirs(COMMIT_TOOL_DIR, exist_ok=True)
     d = dict(cfg)
-    for k in ('gerrit_password', 'redmine_password'):
+    for k in ('gerrit_password', 'redmine_password', 'update_password'):
         if d.get(k):
             d[k] = base64.b64encode(d[k].encode('utf-8')).decode('utf-8')
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -619,6 +770,124 @@ class SolverChoicesLoader(QThread):
                 'options': [],
             }
         self.loaded_sig.emit(self.request_id, result)
+
+
+class AutoUpdateWorker(QThread):
+    finished_sig = pyqtSignal(bool, bool, str)  # ok, changed, message
+
+    def __init__(self, config, local_script_path, parent=None):
+        super().__init__(parent)
+        self.config = dict(config or {})
+        self.local_script_path = os.path.abspath(local_script_path)
+
+    @staticmethod
+    def _parse_port(raw):
+        try:
+            port = int(str(raw).strip() or '22')
+            return port if 1 <= port <= 65535 else 22
+        except (TypeError, ValueError):
+            return 22
+
+    # 需要从远端仓库同步的文件列表
+    REPO_FILES = ['syncRedmine.py', 'install.sh', 'requirements.txt']
+
+    def run(self):
+        host      = (self.config.get('update_host') or '').strip()
+        username  = (self.config.get('update_username') or '').strip()
+        password  = self.config.get('update_password') or ''
+        repo_path = (self.config.get('update_repo_path') or '').strip().rstrip('/')
+        port      = self._parse_port(self.config.get('update_port', '22'))
+
+        if not host or not username or not password or not repo_path:
+            logger.info("自动更新跳过：配置不完整 host=%s username=%s repo_path=%s",
+                        bool(host), bool(username), bool(repo_path))
+            self.finished_sig.emit(True, False, "自动更新未配置完整，已跳过")
+            return
+
+        try:
+            import paramiko
+        except ImportError:
+            logger.warning("自动更新失败：缺少 paramiko 依赖")
+            self.finished_sig.emit(False, False, "缺少 paramiko 依赖，请重新运行 install.sh")
+            return
+
+        client = None
+        sftp   = None
+        tmp_dir = None
+        try:
+            logger.info("开始自动更新检查：host=%s port=%s repo=%s", host, port, repo_path)
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(hostname=host, port=port, username=username,
+                           password=password, timeout=10)
+            sftp = client.open_sftp()
+
+            # ── 下载仓库文件到临时目录 ──────────────────────────────────────
+            tmp_dir = tempfile.mkdtemp(prefix='syncRedmine_update_')
+            downloaded = {}
+            for fname in self.REPO_FILES:
+                remote_file = f"{repo_path}/{fname}"
+                local_file  = os.path.join(tmp_dir, fname)
+                try:
+                    sftp.get(remote_file, local_file)
+                    with open(local_file, 'rb') as f:
+                        downloaded[fname] = f.read()
+                    logger.info("已下载：%s", remote_file)
+                except FileNotFoundError:
+                    if fname == 'syncRedmine.py':
+                        raise RuntimeError(f"远端仓库中找不到 syncRedmine.py：{remote_file}")
+                    logger.warning("远端可选文件不存在，跳过：%s", remote_file)
+
+            # ── 比较主脚本，判断是否有更新 ────────────────────────────────
+            try:
+                with open(self.local_script_path, 'rb') as f:
+                    local_bytes = f.read()
+            except FileNotFoundError:
+                local_bytes = b''
+
+            if downloaded.get('syncRedmine.py') == local_bytes:
+                logger.info("自动更新检查完成：当前已是最新版本")
+                self.finished_sig.emit(True, False, "已检查更新，无新版本")
+                return
+
+            # ── 执行 install.sh 完成安装 ─────────────────────────────────
+            install_sh = os.path.join(tmp_dir, 'install.sh')
+            if not os.path.exists(install_sh):
+                raise RuntimeError("远端仓库中找不到 install.sh，无法自动安装")
+
+            os.chmod(install_sh, 0o755)
+            env = {**os.environ, 'AUTO_INSTALL': '1'}
+            result = subprocess.run(
+                ['bash', install_sh],
+                cwd=tmp_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or '').strip()
+                raise RuntimeError(f"install.sh 返回错误 (code={result.returncode}):\n{detail}")
+
+            logger.info("自动更新成功，install.sh 执行完毕")
+            self.finished_sig.emit(True, True, "检测到新版本，已同步仓库并完成安装")
+
+        except Exception as e:
+            logger.exception("自动更新失败")
+            self.finished_sig.emit(False, False, str(e))
+        finally:
+            try:
+                if sftp is not None:
+                    sftp.close()
+            except Exception:
+                pass
+            try:
+                if client is not None:
+                    client.close()
+            except Exception:
+                pass
+            if tmp_dir:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -989,17 +1258,31 @@ class SyncWorker(QThread):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 账号配置对话框
+# 设置对话框
 # ═══════════════════════════════════════════════════════════════════════════════
 class SetupDialog(AnimatedDialog):
 
     def __init__(self, existing=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("syncRedmine — 配置平台账号")
+        self.setWindowTitle("syncRedmine — 设置")
         self.setWindowIcon(make_icon())
         self.setFixedWidth(700)
         self.config = {}
+        self._update_widgets = []
+        self._update_details_expanded = False
+        self._ssh_anim = None
         self._build(existing or {})
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fix_initial_size)
+
+    def _fix_initial_size(self):
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen:
+            self.setMaximumHeight(screen.availableGeometry().height() - 80)
+        self.adjustSize()
+        self.setFixedHeight(self.height())
 
     def _le(self, placeholder='', pw=False, val=''):
         e = QLineEdit(val)
@@ -1052,12 +1335,86 @@ class SetupDialog(AnimatedDialog):
             layout.addWidget(lbl)
 
     @staticmethod
+    def _field_block(title, widget, hint=None):
+        wrapper = QFrame()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        cap = QLabel(title)
+        cap.setObjectName("FieldCaption")
+        layout.addWidget(cap)
+        layout.addWidget(widget)
+        if hint:
+            lbl = QLabel(hint)
+            lbl.setObjectName("FieldHint")
+            lbl.setWordWrap(True)
+            layout.addWidget(lbl)
+        return wrapper
+
+    @staticmethod
     def _mkbtn(text, role, slot):
         b = QPushButton(text)
         b.setObjectName(role)
         b.setCursor(Qt.PointingHandCursor)
         b.clicked.connect(slot)
         return b
+
+    def _toggle_auto_update_fields(self, checked):
+        for widget in self._update_widgets:
+            widget.setEnabled(checked)
+        if hasattr(self, 'update_detail_toggle'):
+            self.update_detail_toggle.setEnabled(checked)
+        if hasattr(self, 'update_meta'):
+            self.update_meta.setVisible(checked)
+        if not checked:
+            self._set_update_details_visible(False)  # 带动画收起
+        self._refresh_update_summary()
+
+    def _set_update_details_visible(self, visible):
+        expanded = bool(visible and self.update_enabled.isChecked())
+        self._update_details_expanded = expanded
+        if hasattr(self, 'update_detail_toggle'):
+            self.update_detail_toggle.setText("收起 SSH 配置" if expanded else "展开 SSH 配置")
+        if not hasattr(self, 'update_detail_panel'):
+            return
+
+        if self._ssh_anim is not None:
+            self._ssh_anim.stop()
+
+        target_h = self.update_detail_panel.sizeHint().height() if expanded else 0
+        if expanded:
+            self.update_detail_panel.show()
+
+        anim = QPropertyAnimation(self.update_detail_panel, b"maximumHeight", self)
+        anim.setDuration(220)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setStartValue(self.update_detail_panel.maximumHeight())
+        anim.setEndValue(target_h)
+        if not expanded:
+            anim.finished.connect(self.update_detail_panel.hide)
+        self._ssh_anim = anim
+        anim.start()
+
+    def _toggle_update_details(self):
+        self._set_update_details_visible(not self._update_details_expanded)
+
+    def _refresh_update_summary(self):
+        if not hasattr(self, 'update_summary'):
+            return
+        enabled = self.update_enabled.isChecked()
+        self.update_state.setText("自动更新已启用" if enabled else "自动更新已关闭")
+        if not enabled:
+            self.update_summary.setText("关闭后不会在每天 10:00 自动检查新脚本。")
+            return
+
+        configured = sum(bool(value) for value in (
+            self.u_host.text().strip(),
+            self.u_user.text().strip(),
+            self.u_pass.text().strip(),
+            self.u_path.text().strip(),
+        ))
+        state = "已配置完整" if configured == 4 else f"已配置 {configured}/4 项"
+        self.update_summary.setText(f"每天 10:00 检查更新 · {state} · SSH 连接项默认折叠")
 
     def _build(self, cfg):
         root = QVBoxLayout(self)
@@ -1073,6 +1430,20 @@ class SetupDialog(AnimatedDialog):
         body.setSpacing(18)
         body.setContentsMargins(24, 24, 24, 24)
 
+        # ── 滚动区（hero + Gerrit + Redmine + 自动更新）────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }")
+
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setSpacing(18)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+
         hero = GradientPanel('#0f172a', '#2563eb', '#60a5fa')
         hero_layout = QVBoxLayout(hero)
         hero_layout.setSpacing(10)
@@ -1081,29 +1452,29 @@ class SetupDialog(AnimatedDialog):
         hero_top = QHBoxLayout()
         hero_top.addWidget(make_badge("本地同步助手", 'rgba(255,255,255,0.16)', '#ffffff'))
         hero_top.addStretch()
-        hero_top.addWidget(make_badge("账号配置", 'rgba(255,255,255,0.10)', '#dbeafe'))
+        hero_top.addWidget(make_badge("设置", 'rgba(255,255,255,0.10)', '#dbeafe'))
         hero_layout.addLayout(hero_top)
 
         eyebrow = QLabel("syncRedmine")
         eyebrow.setObjectName("HeroEyebrow")
         hero_layout.addWidget(eyebrow)
 
-        title = QLabel("配置 Gerrit 与 Redmine 账号")
+        title = QLabel("设置 Gerrit、Redmine 与自动更新")
         title.setObjectName("HeroTitle")
         title.setWordWrap(True)
         hero_layout.addWidget(title)
 
-        hint = QLabel("用于检测 Gerrit push，并将提交说明同步回 Redmine。")
+        hint = QLabel("用于检测 Gerrit push、同步提交说明到 Redmine，并可按计划自动拉取新脚本。")
         hint.setObjectName("HeroText")
         hint.setWordWrap(True)
         hero_layout.addWidget(hint)
 
-        meta = QLabel("配置仅保存在本机 ~/.commit_tool/sync_config.json")
+        meta = QLabel("设置仅保存在本机 ~/.commit_tool/sync_config.json")
         meta.setObjectName("HeroText")
         meta.setWordWrap(True)
         hero_layout.addWidget(meta)
 
-        body.addWidget(hero)
+        inner_layout.addWidget(hero)
 
         panels = QHBoxLayout()
         panels.setSpacing(16)
@@ -1126,8 +1497,92 @@ class SetupDialog(AnimatedDialog):
         self._add_field(r_layout, "密码", self.r_pass)
         panels.addWidget(r_panel, 1)
 
-        body.addLayout(panels)
+        inner_layout.addLayout(panels)
 
+        u_panel, u_layout = self._panel(
+            "自动更新",
+            "每天 10:00 通过内网 SSH 拉取最新脚本；连接项默认折叠，按需展开编辑即可。",
+            "更新")
+
+        self.update_enabled = QCheckBox("启用每天 10:00 自动检查更新")
+        self.update_enabled.setChecked(bool(cfg.get('auto_update_enabled', True)))
+        u_layout.addWidget(self.update_enabled)
+
+        default_update_host = cfg.get('update_host', LOCAL_MACHINE_IP)
+        host_placeholder = LOCAL_MACHINE_IP or '192.168.x.x'
+        host_help = f"默认当前机器：{LOCAL_MACHINE_IP}" if LOCAL_MACHINE_IP else "填写提供更新的内网机器地址"
+        self.u_host = self._le(host_placeholder, val=default_update_host)
+        self.u_port = self._le('22', val=str(cfg.get('update_port', '22') or '22'))
+        self.u_user = self._le('SSH 用户名', val=cfg.get('update_username', AUTO_UPDATE_DEFAULT_USERNAME))
+        self.u_pass = self._le('SSH 密码', pw=True, val=cfg.get('update_password', AUTO_UPDATE_DEFAULT_PASSWORD))
+        self.u_path = self._le(
+            AUTO_UPDATE_DEFAULT_REPO_PATH,
+            val=cfg.get('update_repo_path', AUTO_UPDATE_DEFAULT_REPO_PATH))
+        self._update_widgets = [self.u_host, self.u_port, self.u_user, self.u_pass, self.u_path]
+
+        self.update_meta = QFrame()
+        update_meta_layout = QHBoxLayout(self.update_meta)
+        update_meta_layout.setContentsMargins(0, 0, 0, 0)
+        update_meta_layout.setSpacing(12)
+
+        update_meta_text = QVBoxLayout()
+        update_meta_text.setSpacing(2)
+        self.update_state = QLabel()
+        self.update_state.setObjectName("InlineState")
+        self.update_summary = QLabel()
+        self.update_summary.setObjectName("InlineSummary")
+        self.update_summary.setWordWrap(True)
+        update_meta_text.addWidget(self.update_state)
+        update_meta_text.addWidget(self.update_summary)
+        update_meta_layout.addLayout(update_meta_text, 1)
+
+        self.update_detail_toggle = self._mkbtn("展开 SSH 配置", "GhostButton", self._toggle_update_details)
+        update_meta_layout.addWidget(self.update_detail_toggle, 0, Qt.AlignTop)
+        u_layout.addWidget(self.update_meta)
+
+        self.update_detail_panel = QFrame()
+        self.update_detail_panel.setObjectName("FieldReveal")
+        self.update_detail_panel.setMaximumHeight(0)   # 初始折叠
+        update_detail_layout = QVBoxLayout(self.update_detail_panel)
+        update_detail_layout.setContentsMargins(18, 4, 0, 0)
+        update_detail_layout.setSpacing(14)
+
+        row_a = QHBoxLayout()
+        row_a.setSpacing(12)
+        row_a.addWidget(self._field_block("源机器 IP / 主机名", self.u_host, host_help), 2)
+        row_a.addWidget(self._field_block("SSH 端口", self.u_port, "默认 22"), 1)
+        update_detail_layout.addLayout(row_a)
+
+        row_b = QHBoxLayout()
+        row_b.setSpacing(12)
+        row_b.addWidget(self._field_block("SSH 用户名", self.u_user), 1)
+        row_b.addWidget(self._field_block("SSH 密码", self.u_pass), 1)
+        update_detail_layout.addLayout(row_b)
+
+        update_detail_layout.addWidget(self._field_block(
+            "远端仓库目录",
+            self.u_path,
+            f"源机器上仓库的绝对路径，默认：{AUTO_UPDATE_DEFAULT_REPO_PATH}；会下载其中的 syncRedmine.py / install.sh / requirements.txt 并执行安装。"))
+        u_layout.addWidget(self.update_detail_panel)
+
+        for widget in self._update_widgets:
+            widget.textChanged.connect(self._refresh_update_summary)
+        self.update_enabled.toggled.connect(self._toggle_auto_update_fields)
+        # 初始化控件状态（无动画）
+        checked = self.update_enabled.isChecked()
+        for w in self._update_widgets:
+            w.setEnabled(checked)
+        self.update_detail_toggle.setEnabled(checked)
+        self.update_meta.setVisible(checked)
+        self._refresh_update_summary()
+
+        inner_layout.addWidget(u_panel)
+        inner_layout.addStretch()
+
+        scroll.setWidget(inner)
+        body.addWidget(scroll, 1)
+
+        # ── 固定在底部：说明 + 按钮（不随滚动消失）─────────────────────────
         info = QFrame()
         info.setObjectName("InfoStrip")
         info_layout = QHBoxLayout(info)
@@ -1135,7 +1590,7 @@ class SetupDialog(AnimatedDialog):
         info_layout.setSpacing(12)
         info_layout.addWidget(make_badge("说明", '#dbeafe', '#1d4ed8'))
 
-        note = QLabel("账号信息仅用于本机检测与同步，不会修改 commit_tool 的现有流程。")
+        note = QLabel("账号与自动更新信息仅保存在本机；自动更新只会替换当前脚本并重启，不会改动 commit_tool 现有流程。")
         note.setObjectName("MetaText")
         note.setWordWrap(True)
         info_layout.addWidget(note, 1)
@@ -1145,7 +1600,7 @@ class SetupDialog(AnimatedDialog):
         row.setSpacing(10)
         row.addStretch()
         row.addWidget(self._mkbtn("取消", "SecondaryButton", self.reject))
-        row.addWidget(self._mkbtn("保存配置", "PrimaryButton", self._save))
+        row.addWidget(self._mkbtn("保存设置", "PrimaryButton", self._save))
         body.addLayout(row)
 
     def _save(self):
@@ -1157,6 +1612,9 @@ class SetupDialog(AnimatedDialog):
             QMessageBox.warning(self, "提示", "请输入 Redmine 用户名"); return
         if not self.r_pass.text().strip():
             QMessageBox.warning(self, "提示", "请输入 Redmine 密码"); return
+        update_port = self.u_port.text().strip() or '22'
+        if update_port and not update_port.isdigit():
+            QMessageBox.warning(self, "提示", "SSH 端口必须是数字"); return
         self.config = {
             'gerrit_url':      self.g_url.text().strip(),
             'gerrit_username': self.g_user.text().strip(),
@@ -1164,10 +1622,16 @@ class SetupDialog(AnimatedDialog):
             'redmine_url':     self.r_url.text().strip(),
             'redmine_username':self.r_user.text().strip(),
             'redmine_password':self.r_pass.text().strip(),
+            'auto_update_enabled': self.update_enabled.isChecked(),
+            'update_host': self.u_host.text().strip(),
+            'update_port': update_port,
+            'update_username': self.u_user.text().strip(),
+            'update_password': self.u_pass.text().strip(),
+            'update_repo_path': self.u_path.text().strip(),
         }
         save_config(self.config)
-        logger.info("用户在配置窗口保存了账号配置")
-        QMessageBox.information(self, "成功", "账号配置已保存 ✓")
+        logger.info("用户在设置窗口保存了配置")
+        QMessageBox.information(self, "成功", "设置已保存 ✓")
         self.accept()
 
 
@@ -1449,7 +1913,7 @@ class SyncDialog(AnimatedDialog):
 
         actions = QHBoxLayout()
         actions.setSpacing(10)
-        actions.addWidget(self._mkbtn("重新配置账号", "LinkButton", self._reconfig))
+        actions.addWidget(self._mkbtn("打开设置", "LinkButton", self._reconfig))
         actions.addStretch()
         self.btn_no = self._mkbtn("暂不处理", "SecondaryButton", self.reject)
         self.btn_yes = self._mkbtn("立即同步", "PrimaryButton", self._start_sync)
@@ -1460,12 +1924,12 @@ class SyncDialog(AnimatedDialog):
         self._set_status("等待用户确认同步。", state='idle')
 
     def _reconfig(self):
-        logger.info("用户打开重新配置账号窗口")
+        logger.info("用户从同步窗口打开设置")
         dlg = SetupDialog(existing=self.config, parent=self)
         if dlg.exec_() == QDialog.Accepted:
             self.config = dlg.config
             self.config_changed = True
-            logger.info("同步窗口中的账号配置已更新")
+            logger.info("同步窗口中的设置已更新")
             self._load_solver_choices_async()
 
     def _set_solver_loading_state(self, text):
@@ -1623,6 +2087,11 @@ class SyncRedmineApp:
         self.config   = load_config()
         self._poller  = None
         self._setup_dialog = None
+        self._auto_update_worker = None
+        self._auto_update_timer = QTimer()
+        self._auto_update_timer.setSingleShot(True)
+        self._auto_update_timer.timeout.connect(self._on_auto_update_timeout)
+        self._script_path = os.path.abspath(sys.argv[0])
         self._first_run_pending = not bool(self.config)
         self.app.setQuitOnLastWindowClosed(False)
         logger.info("syncRedmine 启动，当前配置状态: %s", "已加载" if self.config else "未配置")
@@ -1631,7 +2100,7 @@ class SyncRedmineApp:
         self.tray = QSystemTrayIcon(make_icon())
         self.tray.setToolTip(self.TOOLTIP_IDLE)
         menu = QMenu()
-        menu.addAction("配置账号", self._show_setup)
+        menu.addAction("设置", self._show_setup)
         menu.addSeparator()
         menu.addAction("退  出", app.quit)
         self.tray.setContextMenu(menu)
@@ -1647,9 +2116,88 @@ class SyncRedmineApp:
         self._watcher.directoryChanged.connect(self._on_dir_changed)
         self._last_mtime = self._get_mtime()         # 记录初始 mtime 防止启动误触
 
+        self._schedule_auto_update()
+
         # ── 首次运行引导 ──────────────────────────────────────────────────────
         if self._first_run_pending:
             QTimer.singleShot(600, self._first_run)
+
+    def _auto_update_enabled(self):
+        return bool(self.config and self.config.get('auto_update_enabled', True))
+
+    def _schedule_auto_update(self):
+        self._auto_update_timer.stop()
+        if not self._auto_update_enabled():
+            logger.info("自动更新未启用，已停止定时任务")
+            return
+
+        now = datetime.now()
+        target = now.replace(hour=AUTO_UPDATE_HOUR, minute=AUTO_UPDATE_MINUTE, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        delay_ms = max(1000, int((target - now).total_seconds() * 1000))
+        self._auto_update_timer.start(delay_ms)
+        logger.info("已计划自动更新检查：next=%s delay=%ss", target.strftime('%Y-%m-%d %H:%M:%S'),
+                    delay_ms // 1000)
+
+    def _on_auto_update_timeout(self):
+        self._schedule_auto_update()
+        self._start_auto_update()
+
+    def _start_auto_update(self):
+        if not self._auto_update_enabled():
+            logger.info("自动更新触发时发现已禁用，跳过")
+            return
+        if self._auto_update_worker is not None and self._auto_update_worker.isRunning():
+            logger.info("自动更新仍在进行中，本次跳过重复执行")
+            return
+
+        worker = AutoUpdateWorker(self.config, self._script_path, parent=QApplication.instance())
+        worker.finished_sig.connect(self._on_auto_update_done)
+        worker.finished.connect(lambda w=worker: self._on_auto_update_worker_finished(w))
+        self._auto_update_worker = worker
+        worker.start()
+
+    def _on_auto_update_worker_finished(self, worker):
+        if self._auto_update_worker is worker:
+            self._auto_update_worker = None
+
+    def _on_auto_update_done(self, ok, changed, message):
+        if ok and changed:
+            logger.info("自动更新完成：%s", message)
+            self.tray.showMessage(
+                "syncRedmine",
+                "检测到新版本，正在重启应用...",
+                QSystemTrayIcon.Information, 4000)
+            QTimer.singleShot(1200, self._restart_after_update)
+        elif ok:
+            logger.info("自动更新检查结果：%s", message)
+        else:
+            logger.warning("自动更新失败：%s", message)
+            self.tray.showMessage(
+                "syncRedmine",
+                f"自动更新失败：{message}",
+                QSystemTrayIcon.Warning, 5000)
+
+    def _restart_after_update(self):
+        try:
+            if self._poller and self._poller.isRunning():
+                self._poller.cancel()
+                self._poller = None
+            subprocess.Popen(
+                [sys.executable, self._script_path],
+                cwd=os.path.dirname(self._script_path) or None,
+                start_new_session=True,
+            )
+            logger.info("已拉起新进程，准备退出当前实例: %s", self._script_path)
+        except Exception as e:
+            logger.exception("重启 syncRedmine 失败")
+            self.tray.showMessage(
+                "syncRedmine",
+                f"自动重启失败：{e}",
+                QSystemTrayIcon.Warning, 5000)
+            return
+        self.app.quit()
 
     # ── inotify 事件处理 ──────────────────────────────────────────────────────
     @staticmethod
@@ -1782,7 +2330,8 @@ class SyncRedmineApp:
         dlg.exec_()
         if dlg.config_changed:
             self.config = dlg.config
-            logger.info("同步对话框关闭后，主应用配置已同步更新")
+            self._schedule_auto_update()
+            logger.info("同步对话框关闭后，主应用设置已同步更新")
         self.tray.setIcon(make_icon())
         self.tray.setToolTip(self.TOOLTIP_IDLE)
 
@@ -1790,17 +2339,18 @@ class SyncRedmineApp:
     def _show_setup(self):
         self._first_run_pending = False
         if self._setup_dialog is not None:
-            logger.info("配置账号窗口已存在，切换到前台")
+            logger.info("设置窗口已存在，切换到前台")
             self._focus_dialog(self._setup_dialog)
             return
 
-        logger.info("用户打开配置账号窗口")
+        logger.info("用户打开设置窗口")
         dlg = SetupDialog(existing=self.config)
         self._setup_dialog = dlg
         try:
             if dlg.exec_() == QDialog.Accepted:
                 self.config = dlg.config
-                logger.info("主窗口账号配置已更新")
+                self._schedule_auto_update()
+                logger.info("主窗口设置已更新")
         finally:
             if self._setup_dialog is dlg:
                 self._setup_dialog = None
@@ -1812,17 +2362,19 @@ class SyncRedmineApp:
         self._first_run_pending = False
 
         if self._setup_dialog is not None:
-            logger.info("首次运行引导触发时配置窗口已打开，切换到前台")
+            logger.info("首次运行引导触发时设置窗口已打开，切换到前台")
             self._focus_dialog(self._setup_dialog)
             return
 
-        logger.info("首次运行，弹出引导配置")
+        logger.info("首次运行，弹出引导设置")
         QMessageBox.information(
             None, "欢迎使用 syncRedmine",
-            "首次使用，请配置 Gerrit 和 Redmine 账号。\n\n"
+            "首次使用，请先完成设置。\n\n"
+            "可配置 Gerrit / Redmine 账号，\n"
+            "以及每天 10:00 自动更新。\n\n"
             "配置完成后程序将在后台运行，\n"
             "每次 commit push 完成后自动弹出同步确认。\n\n"
-            "（右键托盘图标可随时重新配置）")
+            "（右键托盘图标可随时打开设置）")
         self._show_setup()
 
 
