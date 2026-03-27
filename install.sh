@@ -9,6 +9,34 @@ INSTALL_DIR="$HOME/.local/share/syncRedmine"
 LOG_DIR="$INSTALL_DIR/logs"
 AUTOSTART_DIR="$HOME/.config/autostart"
 DESKTOP_FILE="$AUTOSTART_DIR/syncRedmine.desktop"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+ensure_modern_pip() {
+    local pip_version major
+
+    if ! "$PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
+        echo "      错误：未检测到可用的 pip，请先安装 python3-pip"
+        exit 1
+    fi
+
+    pip_version="$("$PYTHON_BIN" -m pip --version | awk '{print $2}')"
+    major="${pip_version%%.*}"
+
+    if [[ "${major:-0}" -lt 21 ]]; then
+        echo "      检测到 pip 版本较旧 ($pip_version)，升级用户侧 pip 以兼容 PyQt5 wheel..."
+        "$PYTHON_BIN" -m pip install --user --upgrade pip --quiet
+    fi
+}
+
+install_python_deps() {
+    if ! "$PYTHON_BIN" -m pip install --prefer-binary -r "$SCRIPT_DIR/requirements.txt" --quiet; then
+        echo "      Python 依赖安装失败。"
+        echo "      可尝试以下方式后重试："
+        echo "        1) 手动升级 pip: $PYTHON_BIN -m pip install --user --upgrade pip"
+        echo "        2) Ubuntu 安装系统依赖: sudo apt install python3-pyqt5 python3-requests"
+        exit 1
+    fi
+}
 
 echo "======================================"
 echo "  syncRedmine 安装程序"
@@ -16,7 +44,8 @@ echo "======================================"
 
 # ── 安装 Python 依赖 ───────────────────────────────────────────────────────────
 echo "[1/3] 安装 Python 依赖..."
-pip3 install -r "$SCRIPT_DIR/requirements.txt" --quiet
+ensure_modern_pip
+install_python_deps
 echo "      依赖安装完成"
 
 # ── 复制程序文件 ───────────────────────────────────────────────────────────────

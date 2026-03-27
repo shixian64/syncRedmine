@@ -53,10 +53,13 @@ chmod +x install.sh
 ```
 
 安装脚本会：
-1. 安装 Python 依赖（`requests`、`PyQt5`）
-2. 复制程序到 `~/.local/share/syncRedmine/`
-3. 创建开机自启动配置（`~/.config/autostart/syncRedmine.desktop`）
-4. 询问是否立即启动
+1. 自动检查 `pip` 版本，必要时先升级用户侧 `pip`
+2. 安装 Python 依赖（`requests`、`PyQt5`，优先使用二进制 wheel）
+3. 复制程序到 `~/.local/share/syncRedmine/`
+4. 创建开机自启动配置（`~/.config/autostart/syncRedmine.desktop`）
+5. 询问是否立即启动
+
+如果机器上的 `pip` 版本过旧，安装 `PyQt5` 时可能会退回源码构建并失败；当前安装脚本会先尝试升级用户侧 `pip`，降低这类问题出现的概率。
 
 ### 首次启动
 
