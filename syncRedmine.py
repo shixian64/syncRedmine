@@ -35,7 +35,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QFileSystemWatcher,
-    QPropertyAnimation, QEasingCurve, QRectF,
+    QPropertyAnimation, QEasingCurve, QRectF, QAbstractAnimation, QPoint,
 )
 from PyQt5.QtGui import (
     QFont, QIcon, QPixmap, QPainter, QColor,
@@ -198,6 +198,11 @@ QFrame#InfoStrip {
     border: 1px solid #dbe7ff;
     border-radius: 16px;
 }
+QFrame#InlineInfoBlock {
+    background: #f8fbff;
+    border: 1px solid #dbe7ff;
+    border-radius: 14px;
+}
 QFrame#FieldReveal {
     background: transparent;
     border: none;
@@ -251,7 +256,7 @@ QLabel#InlineState {
 }
 QLabel#InlineSummary {
     color: #64748b;
-    font-size: 9pt;
+    font-size: 8.8pt;
     line-height: 1.45em;
 }
 QLabel#ValueText {
@@ -986,6 +991,100 @@ class AnimatedDialog(QDialog):
         self._fade_anim.start()
 
 
+class SmoothScrollArea(QScrollArea):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scroll_anim = QPropertyAnimation(self.verticalScrollBar(), b"value", self)
+        self._scroll_anim.setDuration(180)
+        self._scroll_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._target_value = 0
+
+        bar = self.verticalScrollBar()
+        bar.setSingleStep(24)
+        bar.rangeChanged.connect(self._on_range_changed)
+
+    def _clamp_value(self, value):
+        bar = self.verticalScrollBar()
+        return max(bar.minimum(), min(bar.maximum(), int(value)))
+
+    def _on_range_changed(self, minimum, maximum):
+        self._target_value = max(minimum, min(maximum, self._target_value))
+        if self._scroll_anim.state() == QAbstractAnimation.Running:
+            current = self.verticalScrollBar().value()
+            target = self._clamp_value(self._target_value)
+            if target != self._scroll_anim.endValue():
+                self._scroll_anim.stop()
+                self._scroll_anim.setStartValue(current)
+                self._scroll_anim.setEndValue(target)
+                self._scroll_anim.start()
+
+    def animate_to(self, value, duration=None):
+        bar = self.verticalScrollBar()
+        target = self._clamp_value(value)
+        current = bar.value()
+        if target == current and self._scroll_anim.state() != QAbstractAnimation.Running:
+            self._target_value = target
+            return
+
+        distance = abs(target - current)
+        self._target_value = target
+        self._scroll_anim.stop()
+        self._scroll_anim.setDuration(duration or max(140, min(260, 140 + distance // 4)))
+        self._scroll_anim.setStartValue(current)
+        self._scroll_anim.setEndValue(target)
+        self._scroll_anim.start()
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            super().wheelEvent(event)
+            return
+
+        bar = self.verticalScrollBar()
+        if bar.maximum() <= bar.minimum():
+            super().wheelEvent(event)
+            return
+
+        pixel_delta = event.pixelDelta().y()
+        if pixel_delta:
+            distance = -pixel_delta
+        else:
+            angle = event.angleDelta().y()
+            if not angle:
+                super().wheelEvent(event)
+                return
+            distance = -(angle / 120.0) * (bar.singleStep() * 2.35)
+
+        base = self._target_value if self._scroll_anim.state() == QAbstractAnimation.Running else bar.value()
+        self.animate_to(base + distance)
+        event.accept()
+
+    def scroll_widget_into_view(self, widget, top_margin=20, bottom_margin=28, animate=True):
+        container = self.widget()
+        if not container or widget is None:
+            return
+
+        top = widget.mapTo(container, QPoint(0, 0)).y()
+        height = max(widget.height(), widget.sizeHint().height())
+        bottom = top + height
+
+        bar = self.verticalScrollBar()
+        view_top = bar.value()
+        view_bottom = view_top + self.viewport().height()
+
+        target = view_top
+        if top - top_margin < view_top:
+            target = top - top_margin
+        elif bottom + bottom_margin > view_bottom:
+            target = bottom + bottom_margin - self.viewport().height()
+
+        target = self._clamp_value(target)
+        if animate:
+            self.animate_to(target, duration=180)
+        else:
+            self._target_value = target
+            bar.setValue(target)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 图标
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1384,12 +1483,19 @@ class SetupDialog(AnimatedDialog):
         target_h = self.update_detail_panel.sizeHint().height() if expanded else 0
         if expanded:
             self.update_detail_panel.show()
+            if hasattr(self, 'scroll'):
+                QTimer.singleShot(0, lambda: self.scroll.scroll_widget_into_view(
+                    self.update_meta, top_margin=16, bottom_margin=24, animate=True))
 
         anim = QPropertyAnimation(self.update_detail_panel, b"maximumHeight", self)
         anim.setDuration(220)
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.setStartValue(self.update_detail_panel.maximumHeight())
         anim.setEndValue(target_h)
+        if expanded and hasattr(self, 'scroll'):
+            anim.valueChanged.connect(
+                lambda _value: self.scroll.scroll_widget_into_view(
+                    self.update_detail_panel, top_margin=18, bottom_margin=28, animate=False))
         if not expanded:
             anim.finished.connect(self.update_detail_panel.hide)
         self._ssh_anim = anim
@@ -1404,17 +1510,18 @@ class SetupDialog(AnimatedDialog):
         enabled = self.update_enabled.isChecked()
         self.update_state.setText("自动更新已启用" if enabled else "自动更新已关闭")
         if not enabled:
-            self.update_summary.setText("关闭后不会在每天 10:00 自动检查新脚本。")
+            self.update_summary.setText("关闭后不再按计划检查新脚本。")
             return
 
         configured = sum(bool(value) for value in (
             self.u_host.text().strip(),
+            self.u_port.text().strip(),
             self.u_user.text().strip(),
             self.u_pass.text().strip(),
             self.u_path.text().strip(),
         ))
-        state = "已配置完整" if configured == 4 else f"已配置 {configured}/4 项"
-        self.update_summary.setText(f"每天 10:00 检查更新 · {state} · SSH 连接项默认折叠")
+        state = "SSH 已配置完整" if configured == 5 else f"SSH 已填写 {configured}/5 项"
+        self.update_summary.setText(f"每日 10:00 自动检查更新 · {state} · 连接项默认折叠")
 
     def _build(self, cfg):
         root = QVBoxLayout(self)
@@ -1431,13 +1538,58 @@ class SetupDialog(AnimatedDialog):
         body.setContentsMargins(24, 24, 24, 24)
 
         # ── 滚动区（hero + Gerrit + Redmine + 自动更新）────────────────────────
-        scroll = QScrollArea()
+        scroll = SmoothScrollArea()
+        self.scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll.setStyleSheet(
-            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }")
+        scroll.setStyleSheet("""
+            QScrollArea, QScrollArea > QWidget > QWidget {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 12px;
+                margin: 4px 0 4px 0;
+            }
+            QScrollBar::groove:vertical {
+                background: rgba(203, 213, 225, 0.36);
+                border-radius: 6px;
+                margin: 0 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(125, 176, 255, 0.95),
+                    stop:1 rgba(37, 99, 235, 0.88)
+                );
+                border-radius: 6px;
+                min-height: 60px;
+                margin: 0 2px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(147, 197, 253, 0.98),
+                    stop:1 rgba(29, 78, 216, 0.92)
+                );
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: rgba(29, 78, 216, 0.96);
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0px;
+                background: transparent;
+                border: none;
+            }
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+        """)
 
         inner = QWidget()
         inner_layout = QVBoxLayout(inner)
@@ -1501,10 +1653,10 @@ class SetupDialog(AnimatedDialog):
 
         u_panel, u_layout = self._panel(
             "自动更新",
-            "每天 10:00 通过内网 SSH 拉取最新脚本；连接项默认折叠，按需展开编辑即可。",
+            "每日 10:00 通过内网 SSH 检查最新脚本；连接项默认折叠，按需展开即可。",
             "更新")
 
-        self.update_enabled = QCheckBox("启用每天 10:00 自动检查更新")
+        self.update_enabled = QCheckBox("启用每日 10:00 自动更新")
         self.update_enabled.setChecked(bool(cfg.get('auto_update_enabled', True)))
         u_layout.addWidget(self.update_enabled)
 
@@ -1521,23 +1673,27 @@ class SetupDialog(AnimatedDialog):
         self._update_widgets = [self.u_host, self.u_port, self.u_user, self.u_pass, self.u_path]
 
         self.update_meta = QFrame()
-        update_meta_layout = QHBoxLayout(self.update_meta)
-        update_meta_layout.setContentsMargins(0, 0, 0, 0)
-        update_meta_layout.setSpacing(12)
+        self.update_meta.setObjectName("InlineInfoBlock")
+        update_meta_layout = QVBoxLayout(self.update_meta)
+        update_meta_layout.setContentsMargins(14, 12, 14, 12)
+        update_meta_layout.setSpacing(8)
 
-        update_meta_text = QVBoxLayout()
-        update_meta_text.setSpacing(2)
+        update_meta_top = QHBoxLayout()
+        update_meta_top.setContentsMargins(0, 0, 0, 0)
+        update_meta_top.setSpacing(10)
         self.update_state = QLabel()
         self.update_state.setObjectName("InlineState")
+        update_meta_top.addWidget(self.update_state, 0, Qt.AlignVCenter)
+        update_meta_top.addStretch()
+
+        self.update_detail_toggle = self._mkbtn("展开 SSH 配置", "GhostButton", self._toggle_update_details)
+        update_meta_top.addWidget(self.update_detail_toggle, 0, Qt.AlignVCenter)
+        update_meta_layout.addLayout(update_meta_top)
+
         self.update_summary = QLabel()
         self.update_summary.setObjectName("InlineSummary")
         self.update_summary.setWordWrap(True)
-        update_meta_text.addWidget(self.update_state)
-        update_meta_text.addWidget(self.update_summary)
-        update_meta_layout.addLayout(update_meta_text, 1)
-
-        self.update_detail_toggle = self._mkbtn("展开 SSH 配置", "GhostButton", self._toggle_update_details)
-        update_meta_layout.addWidget(self.update_detail_toggle, 0, Qt.AlignTop)
+        update_meta_layout.addWidget(self.update_summary)
         u_layout.addWidget(self.update_meta)
 
         self.update_detail_panel = QFrame()
@@ -1586,11 +1742,13 @@ class SetupDialog(AnimatedDialog):
         info = QFrame()
         info.setObjectName("InfoStrip")
         info_layout = QHBoxLayout(info)
-        info_layout.setContentsMargins(16, 14, 16, 14)
-        info_layout.setSpacing(12)
-        info_layout.addWidget(make_badge("说明", '#dbeafe', '#1d4ed8'))
+        info_layout.setContentsMargins(14, 12, 14, 12)
+        info_layout.setSpacing(10)
+        info_layout.addWidget(make_badge("本地", '#dbeafe', '#1d4ed8'), 0, Qt.AlignTop)
 
-        note = QLabel("账号与自动更新信息仅保存在本机；自动更新只会替换当前脚本并重启，不会改动 commit_tool 现有流程。")
+        note = QLabel(
+            "<span style='font-weight:700;color:#0f172a;'>配置仅保存在本机</span>"
+            " · 自动更新只替换当前脚本并重启，不改动 commit_tool。")
         note.setObjectName("MetaText")
         note.setWordWrap(True)
         info_layout.addWidget(note, 1)
@@ -2102,7 +2260,7 @@ class SyncRedmineApp:
         menu = QMenu()
         menu.addAction("设置", self._show_setup)
         menu.addSeparator()
-        menu.addAction("退  出", app.quit)
+        menu.addAction("退出", app.quit)
         self.tray.setContextMenu(menu)
         self.tray.show()
 
