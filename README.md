@@ -67,7 +67,7 @@ chmod +x install.sh
 
 - **Gerrit**：服务器地址、用户名、密码（用于 REST API 检测 push）
 - **Redmine**：服务器地址、用户名、密码（用于同步问题字段）
-- **自动更新**：默认开启，可配置源机器 IP、SSH 端口、SSH 用户名/密码、远端 `syncRedmine.py` 路径；程序会每天 **10:00** 自动检查并在发现新版本后重启
+- **自动更新**：默认开启，源机器默认为 `172.16.3.38:22`，默认 SSH 账号为 `hmt / 123456`，远端仓库目录默认指向源码仓库 `/home/hmt/disk_2T/share/project/自动同步提交信息/syncRedmine`；也可在设置中改成其他源机器 IP、端口、账号密码与远端仓库目录。程序会每天 **10:00** 同步整个源码仓库快照到本机临时目录，随后执行 `install.sh` 覆盖安装并在发现新版本后重启，设置页右侧也支持手动点击“同步代码”
 
 配置保存在 `~/.commit_tool/sync_config.json`（密码 base64 编码）。
 
@@ -142,7 +142,10 @@ syncRedmine/
 
 | 路径 | 说明 |
 |---|---|
-| `~/.local/share/syncRedmine/syncRedmine.py` | 安装后的程序 |
+| `~/.local/share/syncRedmine/syncRedmine.py` | 安装后的主程序 |
+| `~/.local/share/syncRedmine/install.sh` | 安装脚本（自动更新时会同步） |
+| `~/.local/share/syncRedmine/requirements.txt` | Python 依赖列表（自动更新时会同步） |
+| `~/.local/share/syncRedmine/uninstall.sh` | 卸载脚本（自动更新时会同步） |
 | `~/.config/autostart/syncRedmine.desktop` | 开机自启动配置 |
 | `~/.commit_tool/sync_config.json` | 设置配置（密码 base64 编码） |
 | `~/commit_data.log` | commit 工具写入的提交日志（只读监控） |

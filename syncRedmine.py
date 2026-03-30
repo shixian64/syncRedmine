@@ -14,7 +14,7 @@ syncRedmine - 独立后台程序
 配置: python3 syncRedmine.py --setup
 """
 
-import sys, os, re, json, base64, time, glob, logging, subprocess, socket, ipaddress, tempfile, shutil
+import sys, os, re, json, base64, time, glob, logging, subprocess, socket, ipaddress, tempfile, shutil, posixpath, stat
 import urllib.request, urllib.parse, urllib.error
 from html import unescape
 from datetime import datetime, timedelta, timezone
@@ -58,9 +58,10 @@ RECENT_PUSH_SLACK = 8        # Gerrit 时间与本机时间允许偏差 (秒)
 LOG_RETENTION_DAYS = 3       # 最多保留最近 3 个日志文件（通常对应当天 + 前 2 天）
 AUTO_UPDATE_HOUR  = 10
 AUTO_UPDATE_MINUTE = 0
+AUTO_UPDATE_DEFAULT_HOST = '172.16.3.38'
 AUTO_UPDATE_DEFAULT_USERNAME = 'hmt'
 AUTO_UPDATE_DEFAULT_PASSWORD = '123456'
-AUTO_UPDATE_DEFAULT_REPO_PATH = os.path.dirname(os.path.abspath(__file__))
+AUTO_UPDATE_DEFAULT_REPO_PATH = '/home/hmt/disk_2T/share/project/自动同步提交信息/syncRedmine'
 
 
 BENCHMARK_NET = ipaddress.ip_network('198.18.0.0/15')
@@ -434,6 +435,34 @@ logger = setup_logging()
 # ═══════════════════════════════════════════════════════════════════════════════
 # 配置
 # ═══════════════════════════════════════════════════════════════════════════════
+def _looks_like_local_auto_update_template(cfg):
+    host = (cfg.get('update_host') or '').strip()
+    username = (cfg.get('update_username') or '').strip()
+    password = cfg.get('update_password') or ''
+    repo_path = (cfg.get('update_repo_path') or '').strip().rstrip('/')
+    default_repo_path = AUTO_UPDATE_DEFAULT_REPO_PATH.rstrip('/')
+    port = str(cfg.get('update_port', '22') or '22').strip()
+
+    if not LOCAL_MACHINE_IP or host != LOCAL_MACHINE_IP:
+        return False
+    if username != AUTO_UPDATE_DEFAULT_USERNAME:
+        return False
+    if password != AUTO_UPDATE_DEFAULT_PASSWORD:
+        return False
+    if port != '22':
+        return False
+    if repo_path != default_repo_path:
+        return False
+    return True
+
+
+def _looks_like_installed_sync_dir(path):
+    normalized = (path or '').strip().rstrip('/')
+    if not normalized:
+        return False
+    return normalized == APP_DATA_DIR.rstrip('/') or normalized.endswith('/.local/share/syncRedmine')
+
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         return None
@@ -445,8 +474,8 @@ def load_config():
                 d[k] = base64.b64decode(d[k]).decode('utf-8')
         if 'auto_update_enabled' not in d:
             d['auto_update_enabled'] = True
-        if not d.get('update_host') and LOCAL_MACHINE_IP:
-            d['update_host'] = LOCAL_MACHINE_IP
+        if not d.get('update_host'):
+            d['update_host'] = AUTO_UPDATE_DEFAULT_HOST
         if not d.get('update_username'):
             d['update_username'] = AUTO_UPDATE_DEFAULT_USERNAME
         if not d.get('update_password'):
@@ -454,8 +483,19 @@ def load_config():
         # 迁移旧字段：update_remote_path（单文件路径）→ update_repo_path（仓库目录）
         if not d.get('update_repo_path'):
             old = d.pop('update_remote_path', '') or ''
-            d['update_repo_path'] = os.path.dirname(old) if old.endswith('.py') else (old or AUTO_UPDATE_DEFAULT_REPO_PATH)
+            if old:
+                d['update_repo_path'] = os.path.dirname(old) if old.endswith('.py') else old
+            else:
+                d['update_repo_path'] = AUTO_UPDATE_DEFAULT_REPO_PATH
+        else:
+            d.pop('update_remote_path', None)
         d['update_port'] = str(d.get('update_port', '22') or '22')
+        if _looks_like_local_auto_update_template(d):
+            logger.info("检测到旧版自动更新默认主机被写成本机 IP，已自动修正为源机器: %s", AUTO_UPDATE_DEFAULT_HOST)
+            d['update_host'] = AUTO_UPDATE_DEFAULT_HOST
+        if _looks_like_installed_sync_dir(d.get('update_repo_path')):
+            logger.info("检测到旧版自动更新远端仓库目录指向安装目录，已自动修正为源码仓库: %s", AUTO_UPDATE_DEFAULT_REPO_PATH)
+            d['update_repo_path'] = AUTO_UPDATE_DEFAULT_REPO_PATH
         return d
     except Exception:
         return None
@@ -793,8 +833,85 @@ class AutoUpdateWorker(QThread):
         except (TypeError, ValueError):
             return 22
 
-    # 需要从远端仓库同步的文件列表
-    REPO_FILES = ['syncRedmine.py', 'install.sh', 'requirements.txt']
+    # 仓库快照同步规则
+    REQUIRED_FILES = ('syncRedmine.py', 'install.sh')
+    SKIP_DIRS = {'.git', '__pycache__', '.idea', '.vscode', '.pytest_cache', '.mypy_cache', '.venv', 'venv'}
+    LOCAL_SKIP_DIRS = SKIP_DIRS | {'logs'}
+    SKIP_FILES = {'.DS_Store'}
+    SKIP_SUFFIXES = ('.pyc', '.pyo', '.swp', '.tmp', '~')
+
+    @classmethod
+    def _should_skip_entry(cls, name, is_dir):
+        if name in ('.', '..'):
+            return True
+        if is_dir:
+            return name in cls.SKIP_DIRS
+        if name in cls.SKIP_FILES:
+            return True
+        return name.endswith(cls.SKIP_SUFFIXES)
+
+    def _download_repo_snapshot(self, sftp, remote_root, local_root):
+        downloaded = {}
+
+        def walk(remote_dir, rel_dir=''):
+            for attr in sorted(sftp.listdir_attr(remote_dir), key=lambda item: item.filename):
+                name = attr.filename
+                mode = attr.st_mode
+                remote_path = posixpath.join(remote_dir, name)
+                rel_path = os.path.join(rel_dir, name) if rel_dir else name
+
+                if stat.S_ISDIR(mode):
+                    if self._should_skip_entry(name, True):
+                        logger.info("跳过远端目录：%s", remote_path)
+                        continue
+                    os.makedirs(os.path.join(local_root, rel_path), exist_ok=True)
+                    walk(remote_path, rel_path)
+                    continue
+
+                if not stat.S_ISREG(mode):
+                    logger.info("跳过非普通文件：%s", remote_path)
+                    continue
+                if self._should_skip_entry(name, False):
+                    logger.info("跳过远端文件：%s", remote_path)
+                    continue
+
+                local_path = os.path.join(local_root, rel_path)
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                sftp.get(remote_path, local_path)
+                with open(local_path, 'rb') as f:
+                    downloaded[rel_path] = f.read()
+                logger.info("已下载：%s", remote_path)
+
+        walk(remote_root)
+        return downloaded
+
+    @classmethod
+    def _should_skip_local_entry(cls, name, is_dir):
+        if is_dir and name in cls.LOCAL_SKIP_DIRS:
+            return True
+        return cls._should_skip_entry(name, is_dir)
+
+    def _collect_local_snapshot(self, local_root):
+        snapshot = {}
+        if not os.path.isdir(local_root):
+            return snapshot
+
+        for root, dirs, files in os.walk(local_root):
+            dirs[:] = [d for d in dirs if not self._should_skip_local_entry(d, True)]
+            rel_root = os.path.relpath(root, local_root)
+            rel_root = '' if rel_root == '.' else rel_root
+
+            for name in files:
+                if self._should_skip_local_entry(name, False):
+                    continue
+                local_path = os.path.join(root, name)
+                rel_path = os.path.join(rel_root, name) if rel_root else name
+                try:
+                    with open(local_path, 'rb') as f:
+                        snapshot[rel_path] = f.read()
+                except OSError:
+                    logger.warning("读取本地安装文件失败，跳过比较：%s", local_path)
+        return snapshot
 
     def run(self):
         host      = (self.config.get('update_host') or '').strip()
@@ -827,33 +944,31 @@ class AutoUpdateWorker(QThread):
                            password=password, timeout=10)
             sftp = client.open_sftp()
 
-            # ── 下载仓库文件到临时目录 ──────────────────────────────────────
+            # ── 下载整个源码仓库快照到临时目录 ─────────────────────────────
             tmp_dir = tempfile.mkdtemp(prefix='syncRedmine_update_')
-            downloaded = {}
-            for fname in self.REPO_FILES:
-                remote_file = f"{repo_path}/{fname}"
-                local_file  = os.path.join(tmp_dir, fname)
-                try:
-                    sftp.get(remote_file, local_file)
-                    with open(local_file, 'rb') as f:
-                        downloaded[fname] = f.read()
-                    logger.info("已下载：%s", remote_file)
-                except FileNotFoundError:
-                    if fname == 'syncRedmine.py':
-                        raise RuntimeError(f"远端仓库中找不到 syncRedmine.py：{remote_file}")
-                    logger.warning("远端可选文件不存在，跳过：%s", remote_file)
+            logger.info("已创建临时同步目录：%s", tmp_dir)
+            downloaded = self._download_repo_snapshot(sftp, repo_path, tmp_dir)
+            for fname in self.REQUIRED_FILES:
+                if fname not in downloaded:
+                    raise RuntimeError(f"远端仓库中找不到 {fname}：{posixpath.join(repo_path, fname)}")
+            logger.info("仓库快照下载完成：共 %s 个文件", len(downloaded))
 
-            # ── 比较主脚本，判断是否有更新 ────────────────────────────────
-            try:
-                with open(self.local_script_path, 'rb') as f:
-                    local_bytes = f.read()
-            except FileNotFoundError:
-                local_bytes = b''
+            # ── 比较本地已安装文件，判断是否有更新 ─────────────────────────
+            install_dir = os.path.dirname(self.local_script_path)
+            local_snapshot = self._collect_local_snapshot(install_dir)
+            changed_files = []
+            for rel_path in sorted(set(downloaded) | set(local_snapshot)):
+                remote_bytes = downloaded.get(rel_path)
+                local_bytes = local_snapshot.get(rel_path)
+                if remote_bytes != local_bytes:
+                    changed_files.append(rel_path)
 
-            if downloaded.get('syncRedmine.py') == local_bytes:
+            if not changed_files:
                 logger.info("自动更新检查完成：当前已是最新版本")
                 self.finished_sig.emit(True, False, "已检查更新，无新版本")
                 return
+
+            logger.info("检测到以下文件有更新：%s", ', '.join(changed_files))
 
             # ── 执行 install.sh 完成安装 ─────────────────────────────────
             install_sh = os.path.join(tmp_dir, 'install.sh')
@@ -1370,6 +1485,7 @@ class SetupDialog(AnimatedDialog):
         self._update_widgets = []
         self._update_details_expanded = False
         self._ssh_anim = None
+        self._manual_update_worker = None
         self._build(existing or {})
 
     def showEvent(self, event):
@@ -1416,7 +1532,10 @@ class SetupDialog(AnimatedDialog):
         text_col.addWidget(ttl)
         text_col.addWidget(desc)
         head.addLayout(text_col, 1)
-        head.addWidget(make_badge(badge_text))
+        if isinstance(badge_text, QWidget):
+            head.addWidget(badge_text)
+        else:
+            head.addWidget(make_badge(badge_text))
         layout.addLayout(head)
         layout.addWidget(make_divider())
         return panel, layout
@@ -1507,6 +1626,10 @@ class SetupDialog(AnimatedDialog):
     def _refresh_update_summary(self):
         if not hasattr(self, 'update_summary'):
             return
+        if self._manual_update_worker is not None and self._manual_update_worker.isRunning():
+            self.update_state.setText("正在同步代码…")
+            self.update_summary.setText("正在通过内网 SSH 同步源码仓库快照，请稍候。")
+            return
         enabled = self.update_enabled.isChecked()
         self.update_state.setText("自动更新已启用" if enabled else "自动更新已关闭")
         if not enabled:
@@ -1522,6 +1645,81 @@ class SetupDialog(AnimatedDialog):
         ))
         state = "SSH 已配置完整" if configured == 5 else f"SSH 已填写 {configured}/5 项"
         self.update_summary.setText(f"每日 10:00 自动检查更新 · {state} · 连接项默认折叠")
+
+    def _collect_form_config(self):
+        update_port = self.u_port.text().strip() or '22'
+        return {
+            'gerrit_url': self.g_url.text().strip(),
+            'gerrit_username': self.g_user.text().strip(),
+            'gerrit_password': self.g_pass.text().strip(),
+            'redmine_url': self.r_url.text().strip(),
+            'redmine_username': self.r_user.text().strip(),
+            'redmine_password': self.r_pass.text().strip(),
+            'auto_update_enabled': self.update_enabled.isChecked(),
+            'update_host': self.u_host.text().strip(),
+            'update_port': update_port,
+            'update_username': self.u_user.text().strip(),
+            'update_password': self.u_pass.text().strip(),
+            'update_repo_path': self.u_path.text().strip(),
+        }
+
+    def _set_manual_update_button_busy(self, busy):
+        if hasattr(self, 'manual_update_button'):
+            self.manual_update_button.setEnabled(not busy)
+            self.manual_update_button.setText("同步中..." if busy else "同步代码")
+        self._refresh_update_summary()
+
+    def _start_manual_update(self):
+        if self._manual_update_worker is not None and self._manual_update_worker.isRunning():
+            logger.info("设置窗口中已有手动同步任务在执行，忽略重复点击")
+            return
+
+        config = self._collect_form_config()
+        update_port = config.get('update_port', '22')
+        if update_port and not str(update_port).isdigit():
+            QMessageBox.warning(self, "提示", "SSH 端口必须是数字")
+            return
+
+        logger.info("用户在设置窗口手动触发代码同步")
+        worker = AutoUpdateWorker(config, os.path.abspath(sys.argv[0]), parent=QApplication.instance())
+        worker.finished_sig.connect(self._on_manual_update_done)
+        worker.finished.connect(lambda w=worker: self._on_manual_update_worker_finished(w))
+        self._manual_update_worker = worker
+        self._set_manual_update_button_busy(True)
+        worker.start()
+
+    def _on_manual_update_done(self, ok, changed, message):
+        if ok and changed:
+            logger.info("手动同步代码完成：%s", message)
+            QMessageBox.information(self, "syncRedmine", "检测到新版本，已完成同步，程序即将重启。")
+            QTimer.singleShot(150, self._restart_after_manual_update)
+        elif ok:
+            logger.info("手动同步代码结果：%s", message)
+            QMessageBox.information(self, "syncRedmine", message)
+        else:
+            logger.warning("手动同步代码失败：%s", message)
+            QMessageBox.warning(self, "syncRedmine", f"同步代码失败：{message}")
+
+    def _on_manual_update_worker_finished(self, worker):
+        if self._manual_update_worker is worker:
+            self._manual_update_worker = None
+        self._set_manual_update_button_busy(False)
+        worker.deleteLater()
+
+    def _restart_after_manual_update(self):
+        script_path = os.path.abspath(sys.argv[0])
+        try:
+            subprocess.Popen(
+                [sys.executable, script_path],
+                cwd=os.path.dirname(script_path) or None,
+                start_new_session=True,
+            )
+            logger.info("手动同步代码后已拉起新进程，准备退出当前实例: %s", script_path)
+        except Exception as e:
+            logger.exception("手动同步代码后重启 syncRedmine 失败")
+            QMessageBox.warning(self, "syncRedmine", f"自动重启失败：{e}")
+            return
+        QApplication.instance().quit()
 
     def _build(self, cfg):
         root = QVBoxLayout(self)
@@ -1616,7 +1814,7 @@ class SetupDialog(AnimatedDialog):
         title.setWordWrap(True)
         hero_layout.addWidget(title)
 
-        hint = QLabel("用于检测 Gerrit push、同步提交说明到 Redmine，并可按计划自动拉取新脚本。")
+        hint = QLabel("用于检测 Gerrit push、同步提交说明到 Redmine，并可按计划自动同步最新代码。")
         hint.setObjectName("HeroText")
         hint.setWordWrap(True)
         hero_layout.addWidget(hint)
@@ -1651,18 +1849,19 @@ class SetupDialog(AnimatedDialog):
 
         inner_layout.addLayout(panels)
 
+        self.manual_update_button = self._mkbtn("同步代码", "GhostButton", self._start_manual_update)
         u_panel, u_layout = self._panel(
             "自动更新",
-            "每日 10:00 通过内网 SSH 检查最新脚本；连接项默认折叠，按需展开即可。",
-            "更新")
+            "每日 10:00 通过内网 SSH 同步源码仓库快照；也可点击右侧按钮手动同步代码。",
+            self.manual_update_button)
 
         self.update_enabled = QCheckBox("启用每日 10:00 自动更新")
         self.update_enabled.setChecked(bool(cfg.get('auto_update_enabled', True)))
         u_layout.addWidget(self.update_enabled)
 
-        default_update_host = cfg.get('update_host', LOCAL_MACHINE_IP)
-        host_placeholder = LOCAL_MACHINE_IP or '192.168.x.x'
-        host_help = f"默认当前机器：{LOCAL_MACHINE_IP}" if LOCAL_MACHINE_IP else "填写提供更新的内网机器地址"
+        default_update_host = cfg.get('update_host') or AUTO_UPDATE_DEFAULT_HOST
+        host_placeholder = AUTO_UPDATE_DEFAULT_HOST or '192.168.x.x'
+        host_help = f"默认源机器：{AUTO_UPDATE_DEFAULT_HOST}" if AUTO_UPDATE_DEFAULT_HOST else "填写提供更新的内网机器地址"
         self.u_host = self._le(host_placeholder, val=default_update_host)
         self.u_port = self._le('22', val=str(cfg.get('update_port', '22') or '22'))
         self.u_user = self._le('SSH 用户名', val=cfg.get('update_username', AUTO_UPDATE_DEFAULT_USERNAME))
@@ -1718,7 +1917,7 @@ class SetupDialog(AnimatedDialog):
         update_detail_layout.addWidget(self._field_block(
             "远端仓库目录",
             self.u_path,
-            f"源机器上仓库的绝对路径，默认：{AUTO_UPDATE_DEFAULT_REPO_PATH}；会下载其中的 syncRedmine.py / install.sh / requirements.txt 并执行安装。"))
+            f"源机器上源码仓库的绝对路径，默认：{AUTO_UPDATE_DEFAULT_REPO_PATH}；会先下载整个仓库快照到本机临时目录，再执行 install.sh 覆盖安装。"))
         u_layout.addWidget(self.update_detail_panel)
 
         for widget in self._update_widgets:
@@ -1773,20 +1972,7 @@ class SetupDialog(AnimatedDialog):
         update_port = self.u_port.text().strip() or '22'
         if update_port and not update_port.isdigit():
             QMessageBox.warning(self, "提示", "SSH 端口必须是数字"); return
-        self.config = {
-            'gerrit_url':      self.g_url.text().strip(),
-            'gerrit_username': self.g_user.text().strip(),
-            'gerrit_password': self.g_pass.text().strip(),
-            'redmine_url':     self.r_url.text().strip(),
-            'redmine_username':self.r_user.text().strip(),
-            'redmine_password':self.r_pass.text().strip(),
-            'auto_update_enabled': self.update_enabled.isChecked(),
-            'update_host': self.u_host.text().strip(),
-            'update_port': update_port,
-            'update_username': self.u_user.text().strip(),
-            'update_password': self.u_pass.text().strip(),
-            'update_repo_path': self.u_path.text().strip(),
-        }
+        self.config = self._collect_form_config()
         save_config(self.config)
         logger.info("用户在设置窗口保存了配置")
         QMessageBox.information(self, "成功", "设置已保存 ✓")

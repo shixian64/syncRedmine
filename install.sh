@@ -52,8 +52,56 @@ echo "      依赖安装完成"
 echo "[2/3] 安装程序文件到 $INSTALL_DIR ..."
 mkdir -p "$INSTALL_DIR"
 mkdir -p "$LOG_DIR"
-cp "$SCRIPT_DIR/syncRedmine.py" "$INSTALL_DIR/"
+SYNCREDMINE_SRC_DIR="$SCRIPT_DIR" SYNCREDMINE_INSTALL_DIR="$INSTALL_DIR" "$PYTHON_BIN" - <<'PY'
+import os
+import shutil
+
+src = os.environ["SYNCREDMINE_SRC_DIR"]
+dst = os.environ["SYNCREDMINE_INSTALL_DIR"]
+
+skip_dirs = {'.git', '__pycache__', 'logs', '.idea', '.vscode', '.pytest_cache', '.mypy_cache', '.venv', 'venv'}
+skip_files = {'.DS_Store'}
+skip_suffixes = ('.pyc', '.pyo', '.swp', '.tmp', '~')
+preserve_dirs = {'logs'}
+desired_dirs = {''}
+desired_files = set()
+
+for root, dirs, files in os.walk(src):
+    dirs[:] = [d for d in dirs if d not in skip_dirs]
+    rel_root = os.path.relpath(root, src)
+    rel_root = '' if rel_root == '.' else rel_root
+    desired_dirs.add(rel_root)
+    dst_root = dst if not rel_root else os.path.join(dst, rel_root)
+    os.makedirs(dst_root, exist_ok=True)
+    for name in files:
+        if name in skip_files or name.endswith(skip_suffixes):
+            continue
+        rel_path = os.path.join(rel_root, name) if rel_root else name
+        desired_files.add(rel_path)
+        shutil.copy2(os.path.join(root, name), os.path.join(dst_root, name))
+
+for root, dirs, files in os.walk(dst, topdown=False):
+    rel_root = os.path.relpath(root, dst)
+    rel_root = '' if rel_root == '.' else rel_root
+
+    for name in files:
+        rel_path = os.path.join(rel_root, name) if rel_root else name
+        if rel_path in desired_files:
+            continue
+        if any(rel_path == keep or rel_path.startswith(keep + os.sep) for keep in preserve_dirs):
+            continue
+        os.remove(os.path.join(root, name))
+
+    for name in dirs:
+        rel_path = os.path.join(rel_root, name) if rel_root else name
+        if rel_path in preserve_dirs or any(rel_path.startswith(keep + os.sep) for keep in preserve_dirs):
+            continue
+        if rel_path not in desired_dirs:
+            shutil.rmtree(os.path.join(root, name), ignore_errors=True)
+PY
 chmod +x "$INSTALL_DIR/syncRedmine.py"
+[[ -f "$INSTALL_DIR/install.sh" ]] && chmod +x "$INSTALL_DIR/install.sh"
+[[ -f "$INSTALL_DIR/uninstall.sh" ]] && chmod +x "$INSTALL_DIR/uninstall.sh"
 echo "      文件复制完成"
 
 # ── 创建开机自启动 .desktop ────────────────────────────────────────────────────
