@@ -145,7 +145,7 @@ class SetupDialog(AnimatedDialog):
             return
 
         repo = self.u_repo.text().strip()
-        branch = self.u_branch.text().strip() or GITHUB_DEFAULT_BRANCH
+        branch = self.u_branch.currentText() or GITHUB_DEFAULT_BRANCH
         local_ver = AutoUpdateWorker._read_local_version()
         ver_info = f"当前版本：{local_ver[:8]}" if local_ver else "当前版本：未知"
         if repo:
@@ -163,7 +163,7 @@ class SetupDialog(AnimatedDialog):
             'redmine_password': self.r_pass.text().strip(),
             'auto_update_enabled': self.update_enabled.isChecked(),
             'github_repo': self.u_repo.text().strip(),
-            'github_branch': self.u_branch.text().strip() or GITHUB_DEFAULT_BRANCH,
+            'github_branch': self.u_branch.currentText() or GITHUB_DEFAULT_BRANCH,
         }
 
     def _set_manual_update_button_busy(self, busy):
@@ -358,8 +358,16 @@ class SetupDialog(AnimatedDialog):
         u_layout.addWidget(self.update_enabled)
 
         self.u_repo = self._le(GITHUB_DEFAULT_REPO, val=cfg.get('github_repo', GITHUB_DEFAULT_REPO))
-        self.u_branch = self._le(GITHUB_DEFAULT_BRANCH, val=cfg.get('github_branch', GITHUB_DEFAULT_BRANCH))
-        self._update_widgets = [self.u_repo, self.u_branch]
+        self.u_repo.setReadOnly(True)
+        self.u_repo.setStyleSheet("QLineEdit { background: #f1f5f9; color: #64748b; }")
+
+        self.u_branch = QComboBox()
+        self.u_branch.addItems(['main', 'dev'])
+        saved_branch = cfg.get('github_branch', GITHUB_DEFAULT_BRANCH)
+        idx = self.u_branch.findText(saved_branch)
+        self.u_branch.setCurrentIndex(idx if idx >= 0 else 0)
+        self.u_branch.setFixedHeight(44)
+        self._update_widgets = [self.u_branch]
 
         self.update_meta = QFrame()
         self.update_meta.setObjectName("InlineInfoBlock")
@@ -384,12 +392,11 @@ class SetupDialog(AnimatedDialog):
 
         row_repo = QHBoxLayout()
         row_repo.setSpacing(12)
-        row_repo.addWidget(self._field_block("GitHub 仓库", self.u_repo, f"格式：owner/repo，默认：{GITHUB_DEFAULT_REPO}"), 2)
-        row_repo.addWidget(self._field_block("分支", self.u_branch, f"默认：{GITHUB_DEFAULT_BRANCH}"), 1)
+        row_repo.addWidget(self._field_block("GitHub 仓库", self.u_repo, f"格式：owner/repo，默认：{GITHUB_DEFAULT_REPO}"), 1)
+        row_repo.addWidget(self._field_block("分支", self.u_branch, "选择要同步的分支"), 1)
         u_layout.addLayout(row_repo)
 
-        for widget in self._update_widgets:
-            widget.textChanged.connect(self._refresh_update_summary)
+        self.u_branch.currentTextChanged.connect(self._refresh_update_summary)
         self.update_enabled.toggled.connect(self._toggle_auto_update_fields)
         checked = self.update_enabled.isChecked()
         for w in self._update_widgets:
@@ -398,12 +405,7 @@ class SetupDialog(AnimatedDialog):
         self._refresh_update_summary()
 
         inner_layout.addWidget(u_panel)
-        inner_layout.addStretch()
 
-        scroll.setWidget(inner)
-        body.addWidget(scroll, 1)
-
-        # ── 固定在底部：说明 + 按钮（不随滚动消失）─────────────────────────
         info = QFrame()
         info.setObjectName("InfoStrip")
         info_layout = QHBoxLayout(info)
@@ -417,7 +419,11 @@ class SetupDialog(AnimatedDialog):
         note.setObjectName("MetaText")
         note.setWordWrap(True)
         info_layout.addWidget(note, 1)
-        body.addWidget(info)
+        inner_layout.addWidget(info)
+        inner_layout.addStretch()
+
+        scroll.setWidget(inner)
+        body.addWidget(scroll, 1)
 
         row = QHBoxLayout()
         row.setSpacing(10)

@@ -4,6 +4,8 @@
 import os, sys, json, time, subprocess, tempfile, shutil
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from PyQt5.QtCore import QThread, pyqtSignal
 from datetime import datetime, timedelta, timezone
 
@@ -59,6 +61,16 @@ class AutoUpdateWorker(QThread):
     REQUIRED_FILES = ('syncRedmine.py', 'install.sh')
 
     @staticmethod
+    def _make_session():
+        session = requests.Session()
+        retry = Retry(total=3, backoff_factor=1,
+                      status_forcelist=[502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount('https://', adapter)
+        session.mount('http://', adapter)
+        return session
+
+    @staticmethod
     def _read_local_version():
         try:
             if os.path.isfile(VERSION_FILE):
@@ -85,10 +97,12 @@ class AutoUpdateWorker(QThread):
 
         tmp_dir = None
         try:
+            session = self._make_session()
+
             # ── 1. 查询最新 commit SHA ────────────────────────────────────
             api_url = f"https://api.github.com/repos/{repo}/commits/{branch}"
             logger.info("开始自动更新检查：repo=%s branch=%s", repo, branch)
-            resp = requests.get(api_url, headers={'Accept': 'application/vnd.github.v3+json'}, timeout=15)
+            resp = session.get(api_url, headers={'Accept': 'application/vnd.github.v3+json'}, timeout=15)
             if resp.status_code == 404:
                 raise RuntimeError(f"GitHub 仓库或分支不存在：{repo} ({branch})")
             resp.raise_for_status()
@@ -104,7 +118,7 @@ class AutoUpdateWorker(QThread):
             # ── 2. 下载仓库 zip 包 ────────────────────────────────────────
             zip_url = f"https://github.com/{repo}/archive/refs/heads/{branch}.zip"
             logger.info("检测到新版本，正在下载：%s", zip_url)
-            zip_resp = requests.get(zip_url, timeout=120, stream=True)
+            zip_resp = session.get(zip_url, timeout=120, stream=True)
             zip_resp.raise_for_status()
 
             tmp_dir = tempfile.mkdtemp(prefix='syncRedmine_update_')
