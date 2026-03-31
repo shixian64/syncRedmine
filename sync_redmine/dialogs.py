@@ -248,12 +248,12 @@ class SetupDialog(AnimatedDialog):
             QScrollBar:vertical {
                 background: transparent;
                 width: 12px;
-                margin: 4px 0 4px 0;
+                margin: 4px 0 4px 4px;
             }
             QScrollBar::groove:vertical {
                 background: rgba(203, 213, 225, 0.36);
                 border-radius: 6px;
-                margin: 0 2px;
+                margin: 0 1px 0 2px;
             }
             QScrollBar::handle:vertical {
                 background: qlineargradient(
@@ -263,7 +263,7 @@ class SetupDialog(AnimatedDialog):
                 );
                 border-radius: 6px;
                 min-height: 60px;
-                margin: 0 2px;
+                margin: 0 1px 0 2px;
             }
             QScrollBar::handle:vertical:hover {
                 background: qlineargradient(
@@ -290,7 +290,7 @@ class SetupDialog(AnimatedDialog):
         inner = QWidget()
         inner_layout = QVBoxLayout(inner)
         inner_layout.setSpacing(18)
-        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setContentsMargins(6, 0, 0, 0)
 
         hero = GradientPanel('#0f172a', '#2563eb', '#60a5fa')
         hero_layout = QVBoxLayout(hero)
