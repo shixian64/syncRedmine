@@ -250,6 +250,21 @@ QPlainTextEdit:focus {
     color: #2563eb;
     text-decoration: underline;
 }
+#StepButton {
+    background: #ffffff;
+    color: #334155;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    font-size: 12pt;
+    font-weight: 700;
+}
+#StepButton:hover {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+}
+#StepButton:pressed {
+    background: #e2e8f0;
+}
 QCheckBox {
     font-size: 10pt;
     spacing: 8px;

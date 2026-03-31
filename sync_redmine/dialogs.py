@@ -566,6 +566,21 @@ class SyncDialog(AnimatedDialog):
         layout.addWidget(value_lbl)
         return wrapper
 
+    def _step_hours(self, delta):
+        try:
+            val = float(self.edit_hours.text().strip() or '0')
+        except ValueError:
+            val = 0.5
+        val = max(0.5, round(val + delta, 1))
+        self.edit_hours.setText(str(val))
+
+    def _toggle_status(self):
+        if self._status_name == "OnGoing":
+            self._status_name = "Fixed"
+        else:
+            self._status_name = "OnGoing"
+        self.status_label.setText(self._status_name)
+
     @staticmethod
     def _mkbtn(text, role, slot):
         b = QPushButton(text)
@@ -679,16 +694,56 @@ class SyncDialog(AnimatedDialog):
         meta_row = QHBoxLayout()
         meta_row.setSpacing(12)
 
+        # 工时：减号 + 输入框 + 加号
+        hours_row = QHBoxLayout()
+        hours_row.setSpacing(4)
+        btn_dec = QPushButton("−")
+        btn_dec.setObjectName("StepButton")
+        btn_dec.setFixedSize(36, 44)
+        btn_dec.setCursor(Qt.PointingHandCursor)
         self.edit_hours = QLineEdit("0.5")
-        self.edit_hours.setPlaceholderText('0.5')
+        self.edit_hours.setAlignment(Qt.AlignCenter)
         self.edit_hours.setFixedHeight(44)
-        meta_row.addWidget(self._field_block("工时（小时）*", self.edit_hours), 1)
+        self.edit_hours.setMaximumWidth(64)
+        btn_inc = QPushButton("+")
+        btn_inc.setObjectName("StepButton")
+        btn_inc.setFixedSize(36, 44)
+        btn_inc.setCursor(Qt.PointingHandCursor)
+        btn_dec.clicked.connect(lambda: self._step_hours(-0.5))
+        btn_inc.clicked.connect(lambda: self._step_hours(0.5))
+        hours_row.addWidget(btn_dec)
+        hours_row.addWidget(self.edit_hours)
+        hours_row.addWidget(btn_inc)
+        hours_widget = QFrame()
+        hours_widget_layout = QVBoxLayout(hours_widget)
+        hours_widget_layout.setContentsMargins(0, 0, 0, 0)
+        hours_widget_layout.setSpacing(0)
+        hours_widget_layout.addLayout(hours_row)
+        meta_row.addWidget(self._field_block("工时（小时）*", hours_widget), 1)
 
-        self.combo_status = QComboBox()
-        self.combo_status.addItems(["OnGoing", "Fixed"])
-        self.combo_status.setCurrentIndex(0)
-        self.combo_status.setFixedHeight(44)
-        meta_row.addWidget(self._field_block("状态", self.combo_status), 1)
+        # 状态：显示标签 + 切换按钮
+        self._status_name = "OnGoing"
+        status_row = QHBoxLayout()
+        status_row.setSpacing(6)
+        self.status_label = QLabel("OnGoing")
+        self.status_label.setFixedHeight(44)
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet(
+            "border: 1px solid #cbd5e1; border-radius: 10px;"
+            "padding: 0 14px; font-size: 10pt; background: #ffffff; color: #1e293b;")
+        self.btn_toggle_status = QPushButton("切换")
+        self.btn_toggle_status.setObjectName("StepButton")
+        self.btn_toggle_status.setFixedSize(52, 44)
+        self.btn_toggle_status.setCursor(Qt.PointingHandCursor)
+        self.btn_toggle_status.clicked.connect(self._toggle_status)
+        status_row.addWidget(self.status_label, 1)
+        status_row.addWidget(self.btn_toggle_status)
+        status_widget = QFrame()
+        status_widget_layout = QVBoxLayout(status_widget)
+        status_widget_layout.setContentsMargins(0, 0, 0, 0)
+        status_widget_layout.setSpacing(0)
+        status_widget_layout.addLayout(status_row)
+        meta_row.addWidget(self._field_block("状态", status_widget), 1)
         edit_layout.addLayout(meta_row)
 
         self.combo_solver = QComboBox()
@@ -862,7 +917,7 @@ class SyncDialog(AnimatedDialog):
             logger.warning("工时输入无效，使用默认值 0.5: %s", hours_text)
             hours = 0.5
 
-        status_name = self.combo_status.currentText()
+        status_name = self._status_name
         solver_user_id = self.combo_solver.currentData()
         logger.info("用户确认同步: issue=%s status=%s hours=%s",
                     self.fields.get('Bug number', ''), status_name, hours)
