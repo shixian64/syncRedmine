@@ -31,7 +31,6 @@ class SetupDialog(AnimatedDialog):
         self.setWindowIcon(make_icon())
         self.setFixedWidth(700)
         self.config = {}
-        self._update_widgets = []
         self._manual_update_worker = None
         self._build(existing or {})
 
@@ -125,8 +124,6 @@ class SetupDialog(AnimatedDialog):
         return b
 
     def _toggle_auto_update_fields(self, checked):
-        for widget in self._update_widgets:
-            widget.setEnabled(checked)
         if hasattr(self, 'update_meta'):
             self.update_meta.setVisible(checked)
         self._refresh_update_summary()
@@ -354,7 +351,7 @@ class SetupDialog(AnimatedDialog):
             self.manual_update_button)
 
         self.update_enabled = QCheckBox("启用每日 10:00 自动更新")
-        self.update_enabled.setChecked(bool(cfg.get('auto_update_enabled', True)))
+        self.update_enabled.setChecked(bool(cfg.get('auto_update_enabled', False)))
         u_layout.addWidget(self.update_enabled)
 
         self.u_repo = self._le(GITHUB_DEFAULT_REPO, val=cfg.get('github_repo', GITHUB_DEFAULT_REPO))
@@ -367,7 +364,6 @@ class SetupDialog(AnimatedDialog):
         idx = self.u_branch.findText(saved_branch)
         self.u_branch.setCurrentIndex(idx if idx >= 0 else 0)
         self.u_branch.setFixedHeight(44)
-        self._update_widgets = [self.u_branch]
 
         self.update_meta = QFrame()
         self.update_meta.setObjectName("InlineInfoBlock")
@@ -398,10 +394,7 @@ class SetupDialog(AnimatedDialog):
 
         self.u_branch.currentTextChanged.connect(self._refresh_update_summary)
         self.update_enabled.toggled.connect(self._toggle_auto_update_fields)
-        checked = self.update_enabled.isChecked()
-        for w in self._update_widgets:
-            w.setEnabled(checked)
-        self.update_meta.setVisible(checked)
+        self.update_meta.setVisible(self.update_enabled.isChecked())
         self._refresh_update_summary()
 
         inner_layout.addWidget(u_panel)
