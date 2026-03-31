@@ -487,6 +487,9 @@ class SyncDialog(AnimatedDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen:
+            self.setMaximumHeight(screen.availableGeometry().height() - 60)
         if not self._solver_load_started:
             self._solver_load_started = True
             QTimer.singleShot(0, self._load_solver_choices_async)
@@ -496,20 +499,18 @@ class SyncDialog(AnimatedDialog):
         panel = QFrame()
         panel.setObjectName("SectionPanel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
 
         head = QHBoxLayout()
         text_col = QVBoxLayout()
-        text_col.setSpacing(4)
+        text_col.setSpacing(2)
 
         ttl = QLabel(title)
         ttl.setObjectName("SectionTitle")
         desc = QLabel(subtitle)
         desc.setObjectName("SectionDesc")
         desc.setWordWrap(True)
-        desc.setContentsMargins(0, 0, 0, 2)
-        desc.setMinimumHeight(desc.fontMetrics().lineSpacing() + 4)
         text_col.addWidget(ttl)
         text_col.addWidget(desc)
 
@@ -527,8 +528,8 @@ class SyncDialog(AnimatedDialog):
     def _field_block(label_text, widget, hint=None):
         wrapper = QFrame()
         layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 4)
+        layout.setSpacing(4)
 
         label = QLabel(label_text)
         label.setObjectName("FieldCaption")
@@ -547,7 +548,7 @@ class SyncDialog(AnimatedDialog):
         wrapper = QFrame()
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
+        layout.setSpacing(2)
 
         title_lbl = QLabel(title)
         title_lbl.setObjectName("FieldCaption")
@@ -576,7 +577,7 @@ class SyncDialog(AnimatedDialog):
     def _build(self):
         root = QVBoxLayout(self)
         root.setSpacing(0)
-        root.setContentsMargins(18, 18, 18, 18)
+        root.setContentsMargins(14, 14, 14, 14)
 
         shell = QFrame()
         shell.setObjectName("DialogShell")
@@ -584,13 +585,15 @@ class SyncDialog(AnimatedDialog):
         root.addWidget(shell)
 
         body = QVBoxLayout(shell)
-        body.setSpacing(18)
-        body.setContentsMargins(24, 24, 24, 24)
+        body.setSpacing(12)
+        body.setContentsMargins(20, 20, 20, 20)
 
         hero = GradientPanel('#08111f', '#0f766e', '#34d399')
+        hero.setMinimumHeight(0)
+        hero.setMaximumHeight(120)
         hero_layout = QVBoxLayout(hero)
-        hero_layout.setSpacing(10)
-        hero_layout.setContentsMargins(24, 22, 24, 22)
+        hero_layout.setSpacing(6)
+        hero_layout.setContentsMargins(20, 14, 20, 14)
 
         hero_top = QHBoxLayout()
         hero_top.addWidget(make_badge("检测到 Gerrit Push", 'rgba(255,255,255,0.16)', '#ffffff'))
@@ -598,31 +601,60 @@ class SyncDialog(AnimatedDialog):
         hero_top.addWidget(make_badge(f"Issue #{self.issue_number}", 'rgba(255,255,255,0.12)', '#d1fae5'))
         hero_layout.addLayout(hero_top)
 
-        eyebrow = QLabel("syncRedmine")
-        eyebrow.setObjectName("HeroEyebrow")
-        hero_layout.addWidget(eyebrow)
-
         title = QLabel("准备同步到 Redmine")
         title.setObjectName("HeroTitle")
         title.setWordWrap(True)
         hero_layout.addWidget(title)
 
-        subtitle = QLabel("提交信息已就绪，请确认工时、状态与查找思路后再执行同步。")
+        subtitle = QLabel("请确认工时、状态与查找思路后再执行同步。")
         subtitle.setObjectName("HeroText")
         subtitle.setWordWrap(True)
         hero_layout.addWidget(subtitle)
         body.addWidget(hero)
 
+        # ── 滚动区域（内容区）──────────────────────────────────────
+        scroll = SmoothScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setStyleSheet("""
+            QScrollArea, QScrollArea > QWidget > QWidget {
+                background: transparent; border: none;
+            }
+            QScrollBar:vertical {
+                background: transparent; width: 10px; margin: 2px 0;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(148, 163, 184, 0.5);
+                border-radius: 5px; min-height: 40px;
+            }
+            QScrollBar::handle:vertical:hover { background: rgba(100, 116, 139, 0.7); }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px; background: transparent;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+        """)
+
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setSpacing(12)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+
         top = QHBoxLayout()
-        top.setSpacing(16)
+        top.setSpacing(12)
 
         preview_panel, preview_layout = self._panel(
             "提交概览",
             "来自 commit_data.log 与 Gerrit 检测结果。",
             badge="预览")
-        preview_layout.addWidget(self._make_value_widget("Issue", f"#{self.issue_number}"))
-        preview_layout.addWidget(make_divider())
-        preview_layout.addWidget(self._make_value_widget("提交者", self.fields.get('Author', '-') or '-'))
+        info_row = QHBoxLayout()
+        info_row.setSpacing(16)
+        info_row.addWidget(self._make_value_widget("Issue", f"#{self.issue_number}"), 1)
+        info_row.addWidget(self._make_value_widget("提交者", self.fields.get('Author', '-') or '-'), 1)
+        preview_layout.addLayout(info_row)
         preview_layout.addWidget(make_divider())
         preview_layout.addWidget(self._make_value_widget("问题根源", self.fields.get('Root Cause') or PLACEHOLDER))
         preview_layout.addWidget(make_divider())
@@ -639,10 +671,10 @@ class SyncDialog(AnimatedDialog):
 
         self.edit_comment = QPlainTextEdit()
         self.edit_comment.setPlainText(self.fields.get('Comment', '').strip())
-        self.edit_comment.setPlaceholderText('请填写查找问题的思路（留空默认"请填写"）')
-        self.edit_comment.setFixedHeight(124)
+        self.edit_comment.setPlaceholderText('留空默认"查看代码逻辑"')
+        self.edit_comment.setFixedHeight(72)
         edit_layout.addWidget(self._field_block(
-            "【查找问题的思路】", self.edit_comment, "支持手动补充；留空时将使用默认占位内容。"))
+            "【查找问题的思路】", self.edit_comment, "留空时使用默认占位内容。"))
 
         meta_row = QHBoxLayout()
         meta_row.setSpacing(12)
@@ -650,61 +682,60 @@ class SyncDialog(AnimatedDialog):
         self.edit_hours = QLineEdit("0.5")
         self.edit_hours.setPlaceholderText('0.5')
         self.edit_hours.setFixedHeight(44)
-        meta_row.addWidget(self._field_block("工时（小时）*", self.edit_hours, "默认值 0.5"), 1)
+        meta_row.addWidget(self._field_block("工时（小时）*", self.edit_hours), 1)
 
         self.combo_status = QComboBox()
         self.combo_status.addItems(["OnGoing", "Fixed"])
         self.combo_status.setCurrentIndex(0)
         self.combo_status.setFixedHeight(44)
-        meta_row.addWidget(self._field_block("状态", self.combo_status, "同步时写入 Redmine 状态"), 1)
+        meta_row.addWidget(self._field_block("状态", self.combo_status), 1)
         edit_layout.addLayout(meta_row)
 
         self.combo_solver = QComboBox()
         self.combo_solver.setFixedHeight(44)
         self.combo_solver.setEnabled(False)
         self.combo_solver.addItem("正在加载解决者...", None)
-        edit_layout.addWidget(self._field_block(
-            "解决者", self.combo_solver, "默认使用当前登录 Redmine 用户，也可手动改选。"))
-        edit_layout.addStretch()
+        edit_layout.addWidget(self._field_block("解决者", self.combo_solver))
         top.addWidget(edit_panel, 1)
 
-        body.addLayout(top)
+        inner_layout.addLayout(top)
 
-        bottom = QHBoxLayout()
-        bottom.setSpacing(16)
+        # ── 即将更新的字段（紧凑信息条）──────────────────────────────
+        updates_strip = QFrame()
+        updates_strip.setObjectName("InfoStrip")
+        us_layout = QHBoxLayout(updates_strip)
+        us_layout.setContentsMargins(14, 10, 14, 10)
+        us_layout.setSpacing(10)
+        us_layout.addWidget(make_badge("写入", '#dbeafe', '#1d4ed8'), 0, Qt.AlignVCenter)
 
-        updates_panel, updates_layout = self._panel(
-            "即将更新的字段",
-            "同步后会覆盖以下 Redmine 内容。",
-            badge="写入")
         tags = ["状态", "完成度→100%", "解决者", "修复情况",
                 "问题根源", "修复方案", "自测情况", "建议", "查找问题的思路"]
         tag_html = " ".join(
             f'<span style="background:#e3f2fd;color:#1565c0;border-radius:9px;'
-            f'padding:4px 10px;font-size:9pt;">{t}</span>' for t in tags)
-        note = QLabel(tag_html)
-        note.setWordWrap(True)
-        note.setTextFormat(Qt.RichText)
-        updates_layout.addWidget(note)
+            f'padding:3px 9px;font-size:8.5pt;white-space:nowrap;">{t}</span>'
+            for t in tags)
+        tag_lbl = QLabel(tag_html)
+        tag_lbl.setWordWrap(True)
+        tag_lbl.setTextFormat(Qt.RichText)
+        us_layout.addWidget(tag_lbl, 1)
+        inner_layout.addWidget(updates_strip)
 
-        updates_info = QLabel('工时会优先写入名称包含"工时"的自定义字段，无匹配时回退到 time_entries。')
-        updates_info.setObjectName("MetaText")
-        updates_info.setWordWrap(True)
-        updates_layout.addWidget(updates_info)
-        bottom.addWidget(updates_panel, 1)
+        # ── 同步反馈（紧凑信息条）──────────────────────────────────
+        fb_strip = QFrame()
+        fb_strip.setObjectName("InfoStrip")
+        fb_layout = QHBoxLayout(fb_strip)
+        fb_layout.setContentsMargins(14, 10, 14, 10)
+        fb_layout.setSpacing(10)
+        self.status_pill = make_badge("待同步", '#dbeafe', '#1d4ed8')
+        fb_layout.addWidget(self.status_pill, 0, Qt.AlignVCenter)
 
-        feedback_panel, feedback_layout = self._panel(
-            "同步反馈",
-            '点击"立即同步"后在这里查看进度与异常详情。',
-            badge="待同步",
-            badge_style=('#dbeafe', '#1d4ed8'))
-        self.status_pill = feedback_layout.itemAt(0).layout().itemAt(1).widget()
-
+        fb_right = QVBoxLayout()
+        fb_right.setSpacing(4)
         self.status_lbl = QLabel("等待确认。")
         self.status_lbl.setObjectName("StatusText")
         self.status_lbl.setWordWrap(True)
         self.status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        feedback_layout.addWidget(self.status_lbl)
+        fb_right.addWidget(self.status_lbl)
 
         self.error_detail = QPlainTextEdit()
         self.error_detail.setObjectName("ErrorDetail")
@@ -712,10 +743,13 @@ class SyncDialog(AnimatedDialog):
         self.error_detail.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.error_detail.setMaximumHeight(0)
         self.error_detail.hide()
-        feedback_layout.addWidget(self.error_detail)
-        bottom.addWidget(feedback_panel, 1)
+        fb_right.addWidget(self.error_detail)
+        fb_layout.addLayout(fb_right, 1)
+        inner_layout.addWidget(fb_strip)
 
-        body.addLayout(bottom)
+        inner_layout.addStretch()
+        scroll.setWidget(inner)
+        body.addWidget(scroll, 1)
 
         actions = QHBoxLayout()
         actions.setSpacing(10)
@@ -818,7 +852,7 @@ class SyncDialog(AnimatedDialog):
         self._set_status("同步中...", state='running')
 
         # 读取用户手动编辑的值
-        comment_val = self.edit_comment.toPlainText().strip() or PLACEHOLDER
+        comment_val = self.edit_comment.toPlainText().strip() or '查看代码逻辑'
         self.fields['Comment'] = comment_val
 
         hours_text = self.edit_hours.text().strip()
