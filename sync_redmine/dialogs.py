@@ -685,7 +685,7 @@ class SyncDialog(AnimatedDialog):
             badge="编辑")
 
         self.edit_comment = QPlainTextEdit()
-        self.edit_comment.setPlainText(self.fields.get('Comment', '').strip())
+        self.edit_comment.setPlainText('查看代码逻辑')
         self.edit_comment.setPlaceholderText('留空默认"查看代码逻辑"')
         self.edit_comment.setFixedHeight(72)
         edit_layout.addWidget(self._field_block(

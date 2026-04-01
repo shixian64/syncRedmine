@@ -332,6 +332,8 @@ class SyncWorker(QThread):
             uid  = r2.json()['user']['id'] if r2.status_code == 200 else None
             default_solver_uid = str(uid) if uid is not None else None
             solver_uid = self.solver_user_id or default_solver_uid
+            logger.info("hmt--- solver debug: solver_user_id=%s, uid=%s, default_solver_uid=%s, solver_uid=%s",
+                        self.solver_user_id, uid, default_solver_uid, solver_uid)
 
             self.log_sig.emit("获取状态列表...")
             r3 = self._get('/issue_statuses.json')
@@ -354,6 +356,8 @@ class SyncWorker(QThread):
                     cfs.append({'id': cf_map[rf_name], 'value': val})
             # 解决者 —— 优先自定义字段，其次 assigned_to_id
             solver_field_id = cf_map.get(SOLVER_FIELD_NAME)
+            logger.info("hmt--- solver field debug: cf_map_keys=%s, solver_field_id=%s, solver_uid=%s",
+                        list(cf_map.keys()), solver_field_id, solver_uid)
             if solver_uid and solver_field_id:
                 cfs.append({'id': solver_field_id, 'value': solver_uid})
                 source = "manual" if self.solver_user_id else "default"
@@ -380,6 +384,7 @@ class SyncWorker(QThread):
             if cfs:
                 update['custom_fields'] = cfs
 
+            logger.info("hmt--- update payload: %s", json.dumps({'issue': update}, ensure_ascii=False))
             self.log_sig.emit(f"提交更新 issue #{issue_id}...")
             r4 = self._put(f'/issues/{issue_id}.json', {'issue': update})
             if r4.status_code in (200, 204):
