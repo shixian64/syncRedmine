@@ -4,7 +4,7 @@
 import sys, os, subprocess
 
 from PyQt5.QtWidgets import (
-    QApplication, QDialog, QMessageBox,
+    QApplication, QDialog, QMessageBox, QInputDialog,
     QSystemTrayIcon, QMenu,
 )
 from PyQt5.QtCore import Qt, QTimer, QFileSystemWatcher
@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from .constants import (
     DEFAULT_LOG, AUTO_UPDATE_HOUR, AUTO_UPDATE_MINUTE,
+    WORKLOAD_HOUR, WORKLOAD_MINUTE,
     logger,
 )
 from .config import load_config
@@ -45,6 +46,8 @@ class SyncRedmineApp:
         self.tray.setToolTip(self.TOOLTIP_IDLE)
         menu = QMenu()
         menu.addAction("设置", self._show_setup)
+        menu.addAction("工时提交", self._show_workload_dialog)
+        menu.addAction("工时提醒时间", self._edit_workload_time)
         menu.addSeparator()
         menu.addAction("退出", app.quit)
         self.tray.setContextMenu(menu)
@@ -61,6 +64,13 @@ class SyncRedmineApp:
         self._last_mtime = self._get_mtime()         # 记录初始 mtime 防止启动误触
 
         self._schedule_auto_update()
+
+        # ── 工时提醒定时器 ────────────────────────────────────────────────────
+        self._workload_timer = QTimer()
+        self._workload_timer.setSingleShot(True)
+        self._workload_timer.timeout.connect(self._on_workload_timeout)
+        self._workload_dialog = None
+        self._schedule_workload_reminder()
 
         # ── 首次运行引导 ──────────────────────────────────────────────────────
         if self._first_run_pending:
@@ -320,3 +330,86 @@ class SyncRedmineApp:
             "每次 commit push 完成后自动弹出同步确认。\n\n"
             "（右键托盘图标可随时打开设置）")
         self._show_setup()
+
+    # ── 工时提醒 ──────────────────────────────────────────────────────────
+    def _schedule_workload_reminder(self):
+        """计划每日工时提醒弹窗。"""
+        self._workload_timer.stop()
+        hour = WORKLOAD_HOUR
+        minute = WORKLOAD_MINUTE
+        if self.config:
+            hour = self.config.get('workload_hour', WORKLOAD_HOUR)
+            minute = self.config.get('workload_minute', WORKLOAD_MINUTE)
+
+        now = datetime.now()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        delay_ms = max(1000, int((target - now).total_seconds() * 1000))
+        self._workload_timer.start(delay_ms)
+        logger.info("已计划工时提醒: next=%s delay=%ss",
+                     target.strftime('%Y-%m-%d %H:%M:%S'), delay_ms // 1000)
+
+    def _on_workload_timeout(self):
+        self._schedule_workload_reminder()
+        self._show_workload_dialog()
+
+    def _show_workload_dialog(self):
+        if self._workload_dialog is not None:
+            self._focus_dialog(self._workload_dialog)
+            return
+        if not self.config:
+            self.tray.showMessage(
+                "syncRedmine",
+                "请先完成基础设置后再使用工时提交功能",
+                QSystemTrayIcon.Warning, 4000)
+            return
+
+        from .workload_dialog import WorkloadDialog
+        dlg = WorkloadDialog(self.config)
+        self._workload_dialog = dlg
+        dlg.exec_()
+        if dlg.config_changed:
+            self.config = dlg.config
+            self._schedule_workload_reminder()
+            logger.info("工时对话框关闭后，主应用配置已同步更新")
+        self._workload_dialog = None
+        dlg.deleteLater()
+
+    def _edit_workload_time(self):
+        """弹出输入框让用户修改工时提醒时间（HH:MM 格式）。"""
+        if not self.config:
+            self.config = {}
+        cur_h = self.config.get('workload_hour', WORKLOAD_HOUR)
+        cur_m = self.config.get('workload_minute', WORKLOAD_MINUTE)
+        cur_str = f'{cur_h:02d}:{cur_m:02d}'
+
+        text, ok = QInputDialog.getText(
+            None, "工时提醒时间",
+            "请输入每日提醒时间（HH:MM 格式）：",
+            text=cur_str)
+        if not ok or not text.strip():
+            return
+
+        parts = text.strip().split(':')
+        if len(parts) != 2:
+            QMessageBox.warning(None, "格式错误", "请使用 HH:MM 格式，如 17:00")
+            return
+        try:
+            h, m = int(parts[0]), int(parts[1])
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                raise ValueError
+        except ValueError:
+            QMessageBox.warning(None, "格式错误", "小时须为 0-23，分钟须为 0-59")
+            return
+
+        self.config['workload_hour'] = h
+        self.config['workload_minute'] = m
+        from .config import save_config
+        save_config(self.config)
+        self._schedule_workload_reminder()
+        self.tray.showMessage(
+            "syncRedmine",
+            f"工时提醒已设为每日 {h:02d}:{m:02d}",
+            QSystemTrayIcon.Information, 3000)
+        logger.info("用户修改工时提醒时间: %02d:%02d", h, m)

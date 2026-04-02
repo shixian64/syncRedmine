@@ -16,7 +16,7 @@ def load_config():
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             d = json.load(f)
-        for k in ('gerrit_password', 'redmine_password'):
+        for k in ('gerrit_password', 'redmine_password', 'pm_password'):
             if d.get(k):
                 d[k] = base64.b64decode(d[k]).decode('utf-8')
         if 'auto_update_enabled' not in d:
@@ -38,7 +38,7 @@ def load_config():
 def save_config(cfg):
     os.makedirs(COMMIT_TOOL_DIR, exist_ok=True)
     d = dict(cfg)
-    for k in ('gerrit_password', 'redmine_password'):
+    for k in ('gerrit_password', 'redmine_password', 'pm_password'):
         if d.get(k):
             d[k] = base64.b64encode(d[k].encode('utf-8')).decode('utf-8')
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:

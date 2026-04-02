@@ -24,6 +24,10 @@ GITHUB_DEFAULT_REPO = 'shixian64/syncRedmine'
 GITHUB_DEFAULT_BRANCH = 'main'
 VERSION_FILE = os.path.join(APP_DATA_DIR, '.current_version')
 
+# 工时提交相关
+WORKLOAD_HOUR = 17
+WORKLOAD_MINUTE = 0
+
 # commit_data.log 字段 → Redmine 自定义字段名
 FIELD_MAP = {
     'Root Cause':      '【问题根源】',
