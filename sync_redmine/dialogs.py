@@ -934,9 +934,10 @@ class SyncDialog(AnimatedDialog):
             self.error_detail.clear()
             self._toggle_error_detail(False)
             logger.info("同步结果成功: %s", msg)
-            self._set_status(f"✓  {msg}", state='success')
-            self.btn_no.setText("关闭")
-            self.btn_no.setEnabled(True)
+            self._set_status(f"✓  {msg}\n窗口即将自动关闭。", state='success')
+            self.btn_yes.setEnabled(False)
+            self.btn_no.setEnabled(False)
+            QTimer.singleShot(800, self.accept)
         else:
             self.error_detail.setPlainText(msg)
             self._toggle_error_detail(True)

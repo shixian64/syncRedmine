@@ -284,7 +284,7 @@ class WorkloadDialog(AnimatedDialog):
         actions.setSpacing(10)
         actions.addStretch()
         self.btn_cancel = self._mkbtn("取消", "SecondaryButton", self.reject)
-        self.btn_submit = self._mkbtn("保存", "PrimaryButton", self._submit)
+        self.btn_submit = self._mkbtn("提交", "PrimaryButton", self._submit)
         actions.addWidget(self.btn_cancel)
         actions.addWidget(self.btn_submit)
         body.addLayout(actions)
@@ -952,9 +952,9 @@ class WorkloadDialog(AnimatedDialog):
         self._submit_worker.start()
 
     def _on_submit_success(self, msg):
-        self._set_status(f"\u2713  {msg}", state='success')
-        self.btn_cancel.setText("关闭")
-        self.btn_cancel.setEnabled(True)
+        self._set_status(f"\u2713  {msg}\n窗口即将自动关闭。", state='success')
+        self.btn_submit.setEnabled(False)
+        self.btn_cancel.setEnabled(False)
         logger.info("工时提交成功")
 
         self.config['workload_defaults'] = {
@@ -969,6 +969,7 @@ class WorkloadDialog(AnimatedDialog):
         }
         save_config(self.config)
         self.config_changed = True
+        QTimer.singleShot(800, self.accept)
 
     def _on_submit_error(self, msg):
         self.error_detail.setPlainText(msg)
