@@ -195,6 +195,58 @@ def fetch_history_records(session, user_id, days=90):
     return data.get('record') or data.get('records') or []
 
 
+def fetch_previous_day_record(session, user_id):
+    """查询前一天（自然日）的工时记录，返回最后一条。"""
+    yesterday = datetime.now() - timedelta(days=1)
+    start = yesterday.strftime('%Y-%m-%d 00:00:00')
+    end = yesterday.strftime('%Y-%m-%d 23:59:59')
+    data = session.post('/workloadRecord/listDtoByPage', {
+        'currPage': 1,
+        'pageSize': 50,
+        'dataForm': {
+            'creatorId': user_id,
+            'workTimes': [start, end],
+        },
+    })
+    records = data.get('record') or data.get('records') or []
+    if not records:
+        return None
+    return records[-1]
+
+
+def record_to_defaults(record):
+    """把 PM 工时记录转为 workload_defaults 格式 dict。"""
+    if not record:
+        return None
+
+    common = record.get('commonProject') or {}
+    work_hour = record.get('workHour')
+    if work_hour in (None, ''):
+        work_hour = '7'
+
+    return {
+        'workloadType': str(record.get('workloadType', '1')),
+        'preResearchProjectId': str(record.get('preResearchProjectId') or ''),
+        'projectCategory': record.get('projectCategory') or '',
+        'commonProjectId': str(record.get('commonProjectId') or ''),
+        'outerProjectCategory': (
+            record.get('outerProjectCategory')
+            or common.get('commonProjectName')
+            or common.get('commonProjectDescription')
+            or ''
+        ),
+        'businessDepartment': str(record.get('businessDepartment') or ''),
+        'workModuleId': str(record.get('workModuleId') or ''),
+        'workSubModuleId': str(record.get('workSubModuleId') or ''),
+        'workloadNpiNode': record.get('workloadNpiNode') or '',
+        'productForm': record.get('productForm') or '',
+        'inspectorId': str(record.get('inspectorId') or ''),
+        'workContent': record.get('workContent') or '',
+        'workHour': str(work_hour),
+        'remark': record.get('remark') or '',
+    }
+
+
 def build_sub_module_map(records):
     """从历史记录构建 {workModuleId: [{id, name}]} 映射。"""
     mapping = {}

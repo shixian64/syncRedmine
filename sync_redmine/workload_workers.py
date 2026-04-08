@@ -9,7 +9,7 @@ from .workload_api import (
     fetch_development_projects, fetch_common_projects,
     fetch_work_modules, fetch_work_sub_modules_by_module,
     fetch_npi_nodes, fetch_product_forms, fetch_check_persons,
-    fetch_history_records,
+    fetch_history_records, fetch_previous_day_record, record_to_defaults,
     extract_project_categories,
     submit_workload, fetch_redmine_activities,
 )
@@ -56,6 +56,13 @@ class WorkloadDropdownLoader(QThread):
             records = fetch_history_records(session, user_id, days=90)
             project_categories = extract_project_categories(records)
 
+            prev_day_record = None
+            try:
+                prev_day_record = fetch_previous_day_record(session, user_id)
+            except Exception:
+                logger.debug("查询前一天工时记录失败，将使用本地默认值")
+            prev_day_defaults = record_to_defaults(prev_day_record) if prev_day_record else None
+
             self.loaded_sig.emit({
                 'dev_projects': dev_projects,
                 'common_projects': common_projects,
@@ -64,6 +71,7 @@ class WorkloadDropdownLoader(QThread):
                 'product_forms': product_forms,
                 'check_persons': check_persons,
                 'project_categories': project_categories,
+                'prev_day_defaults': prev_day_defaults,
                 'user_id': user_id,
                 'user_nick': session.user_nick,
                 'pm_session_base': pm_url,

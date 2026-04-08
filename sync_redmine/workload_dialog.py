@@ -66,6 +66,8 @@ class WorkloadDialog(AnimatedDialog):
         self._pm_user_id = None
         self._sub_module_loader = None
         self._common_projects = []
+        self._prev_day_defaults = None
+        self._used_prev_day = False
         self._setup_mode = not self._has_pm_config()
 
         self.setWindowTitle("syncRedmine — 每日工时提交")
@@ -78,6 +80,9 @@ class WorkloadDialog(AnimatedDialog):
         return bool(self.config.get('pm_url')
                      and self.config.get('pm_username')
                      and self.config.get('pm_password'))
+
+    def _get_effective_defaults(self):
+        return self._prev_day_defaults or self.config.get('workload_defaults') or {}
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -675,7 +680,7 @@ class WorkloadDialog(AnimatedDialog):
         self._act_list_widget.setTextFormat(Qt.RichText)
         tint_badge(self._act_badge, f"{len(activities)} 条", '#dcfce7', '#15803d')
 
-        if not self.edit_content.toPlainText().strip():
+        if not self.edit_content.toPlainText().strip() and not self._used_prev_day:
             content_lines = [act["title"] for act in activities]
             self.edit_content.setPlainText('\n'.join(content_lines))
 
@@ -718,7 +723,8 @@ class WorkloadDialog(AnimatedDialog):
     def _on_dropdowns_loaded(self, data):
         self._pm_user_id = data.get('user_id')
         self._sub_module_map = data.get('sub_module_map') or {}
-        defaults = self.config.get('workload_defaults') or {}
+        self._prev_day_defaults = data.get('prev_day_defaults') or None
+        defaults = self._get_effective_defaults()
 
         # 开发项目列表（从 API 加载，含 businessDepartment/productForm 关联）
         self._dev_projects = data.get('dev_projects') or []
@@ -761,8 +767,13 @@ class WorkloadDialog(AnimatedDialog):
                 common_idx = i + 1
             elif default_common_name and name == default_common_name:
                 common_idx = i + 1
+        if common_idx == 0 and (default_common_id or default_common_name):
+            fallback_name = default_common_name or str(default_common_id)
+            fallback_data = default_common_id if default_common_id else None
+            self.combo_common_project.addItem(fallback_name, fallback_data)
+            common_idx = self.combo_common_project.count() - 1
         self.combo_common_project.setCurrentIndex(common_idx)
-        self.combo_common_project.setEnabled(bool(self._common_projects))
+        self.combo_common_project.setEnabled(bool(self._common_projects) or common_idx > 0)
         self.combo_common_project.blockSignals(False)
 
         # 模块（与网页一致：只有1个时自动选，否则不预选）
@@ -839,6 +850,27 @@ class WorkloadDialog(AnimatedDialog):
                      len(self._dev_projects), len(self._common_projects),
                      len(modules), len(npi_nodes), len(forms), len(persons))
 
+        type_id = defaults.get('workloadType')
+        btn_map = {
+            '0': self._radio_preresearch,
+            '1': self._radio_develop,
+            '2': self._radio_common,
+        }
+        if type_id in btn_map:
+            btn_map[type_id].setChecked(True)
+
+        self._used_prev_day = False
+        work_content = defaults.get('workContent') or ''
+        if work_content:
+            self.edit_content.setPlainText(work_content)
+            self._used_prev_day = bool(self._prev_day_defaults)
+        work_hour = defaults.get('workHour')
+        if work_hour not in (None, ''):
+            self.edit_hours.setText(str(work_hour))
+        remark = defaults.get('remark') or ''
+        if remark:
+            self.edit_remark.setText(remark)
+
         # 重新应用任务类别的锁定规则
         if self._type_group.checkedId() >= 0:
             self._on_type_changed()
@@ -886,7 +918,7 @@ class WorkloadDialog(AnimatedDialog):
         if self.combo_module.currentData() != module_id:
             return
 
-        defaults = self.config.get('workload_defaults') or {}
+        defaults = self._get_effective_defaults()
         default_sub = defaults.get('workSubModuleId')
 
         self.combo_submodule.blockSignals(True)
@@ -937,11 +969,22 @@ class WorkloadDialog(AnimatedDialog):
             hours = 7
 
         wl_type = self._get_workload_type()
+        defaults = self._get_effective_defaults()
+        pre_research_project_id = (
+            str(defaults.get('preResearchProjectId') or '')
+            if wl_type == '0' else ''
+        )
         common_project_id = self.combo_common_project.currentData()
         common_project_name = (
             self.combo_common_project.currentText().strip()
             if common_project_id is not None else ''
         )
+        if wl_type == '2' and common_project_id is None:
+            fallback_common_id = defaults.get('commonProjectId')
+            fallback_common_name = defaults.get('outerProjectCategory') or ''
+            if fallback_common_id:
+                common_project_id = fallback_common_id
+                common_project_name = fallback_common_name or str(fallback_common_id)
 
         # 任务日期
         qdate = self.date_edit.date()
@@ -949,7 +992,7 @@ class WorkloadDialog(AnimatedDialog):
 
         payload = {
             'workloadType': wl_type,
-            'preResearchProjectId': '',
+            'preResearchProjectId': pre_research_project_id,
             'commonProjectId': str(common_project_id) if wl_type == '2' and common_project_id is not None else '',
             'projectCategory': self.combo_project.currentText().strip() if wl_type == '1' else '',
             'outerProjectCategory': common_project_name if wl_type == '2' else '',
@@ -975,10 +1018,11 @@ class WorkloadDialog(AnimatedDialog):
             QMessageBox.warning(self, "提示", "请先选择任务类别。")
             return
         wl_type = self._get_workload_type()
+        defaults = self._get_effective_defaults()
         if wl_type == '1' and not self.combo_project.currentText().strip():
             QMessageBox.warning(self, "提示", "请选择开发项目。")
             return
-        if wl_type == '2' and self.combo_common_project.currentData() is None:
+        if wl_type == '2' and self.combo_common_project.currentData() is None and not defaults.get('commonProjectId'):
             QMessageBox.warning(self, "提示", "请选择 common 项目。")
             return
         content = self.edit_content.toPlainText().strip()
@@ -1014,8 +1058,13 @@ class WorkloadDialog(AnimatedDialog):
         self.btn_cancel.setEnabled(False)
         logger.info("工时提交成功")
 
+        defaults = self._get_effective_defaults()
         self.config['workload_defaults'] = {
             'workloadType': self._get_workload_type(),
+            'preResearchProjectId': (
+                str(defaults.get('preResearchProjectId') or '')
+                if self._get_workload_type() == '0' else ''
+            ),
             'projectCategory': self.combo_project.currentText().strip(),
             'commonProjectId': str(self.combo_common_project.currentData() or ''),
             'outerProjectCategory': (
@@ -1028,6 +1077,9 @@ class WorkloadDialog(AnimatedDialog):
             'workloadNpiNode': self.combo_npi.currentData() or self.combo_npi.currentText(),
             'productForm': self.combo_product.currentData() or self.combo_product.currentText(),
             'inspectorId': str(self.combo_inspector.currentData() or ''),
+            'workContent': self.edit_content.toPlainText().strip(),
+            'workHour': self.edit_hours.text().strip(),
+            'remark': self.edit_remark.text().strip(),
         }
         save_config(self.config)
         self.config_changed = True
