@@ -3,11 +3,16 @@
 
 import re
 import json
+import threading
 from datetime import datetime, timedelta
 
 import requests
 
 from .constants import logger
+
+
+_PM_AUTH_CACHE = {}
+_PM_AUTH_LOCK = threading.Lock()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -23,9 +28,62 @@ class PMSession:
         self.session = requests.Session()
         self.user_id = None
         self.user_nick = None
+        self.token = None
+        self._restore_cached_auth()
 
-    def login(self):
+    def _cache_key(self):
+        return (self.base, self.username, self.password)
+
+    def _restore_cached_auth(self):
+        """从进程内缓存恢复 PM 登录态，减少重复登录。"""
+        with _PM_AUTH_LOCK:
+            cached = _PM_AUTH_CACHE.get(self._cache_key())
+
+        if not cached:
+            return False
+
+        self.user_id = cached.get('user_id')
+        self.user_nick = cached.get('user_nick')
+        self.token = cached.get('token')
+        cookies = cached.get('cookies') or {}
+        if self.token:
+            self.session.headers.update({'Authorization': self.token})
+        if cookies:
+            self.session.cookies.update(cookies)
+        logger.debug("复用 PM 登录态: userId=%s nick=%s", self.user_id, self.user_nick)
+        return True
+
+    def _save_cached_auth(self):
+        """保存当前登录态到进程内缓存。"""
+        with _PM_AUTH_LOCK:
+            _PM_AUTH_CACHE[self._cache_key()] = {
+                'user_id': self.user_id,
+                'user_nick': self.user_nick,
+                'token': self.token,
+                'cookies': requests.utils.dict_from_cookiejar(self.session.cookies),
+            }
+
+    def _clear_cached_auth(self):
+        """清理本地及进程内缓存的登录态。"""
+        with _PM_AUTH_LOCK:
+            _PM_AUTH_CACHE.pop(self._cache_key(), None)
+        self.user_id = None
+        self.user_nick = None
+        self.token = None
+        self.session.headers.pop('Authorization', None)
+        self.session.cookies.clear()
+
+    def login(self, force=False):
         """POST /pmSystemApi/admin/login → 返回 {userId, userNick, ...}"""
+        if not force and self.token and self.user_id:
+            return {
+                'code': 200,
+                'msg': 'reuse cached login',
+                'userId': self.user_id,
+                'nickName': self.user_nick,
+                'token': self.token,
+            }
+
         resp = self.session.post(
             f'{self.base}/pmSystemApi/admin/login',
             json={'userName': self.username, 'password': self.password, 'rememberMe': False},
@@ -41,6 +99,7 @@ class PMSession:
         self.token = data.get('token')
         if self.token:
             self.session.headers.update({'Authorization': self.token})
+        self._save_cached_auth()
         logger.info("PM 系统登录成功: userId=%s nick=%s", self.user_id, self.user_nick)
         return data
 
@@ -50,6 +109,9 @@ class PMSession:
         form=True 时使用 application/x-www-form-urlencoded 格式，
         form=False 时使用 application/json 格式。
         """
+        if not self.token:
+            self.login()
+
         url = f'{self.base}/pmSystemApi/admin{path}'
         kw = dict(data=body, timeout=15) if form else dict(json=body or {}, timeout=15)
         resp = self.session.post(url, **kw)
@@ -57,7 +119,8 @@ class PMSession:
         data = resp.json()
         if data.get('code') == 401:
             logger.info("PM session 过期，尝试重新登录")
-            self.login()
+            self._clear_cached_auth()
+            self.login(force=True)
             resp = self.session.post(url, **kw)
             resp.raise_for_status()
             data = resp.json()
@@ -73,6 +136,12 @@ def fetch_development_projects(session):
     """获取开发项目列表（含关联的 businessDepartment 和 productForm）。"""
     data = session.post('/userWorkloadData/getPMSAndReProjectDataByUserId', {})
     return data.get('developmentProject') or []
+
+
+def fetch_common_projects(session):
+    """获取 common 项目列表。"""
+    data = session.post('/commonProject/lists', {})
+    return data.get('lists') or []
 
 
 def fetch_work_modules(session, user_id):

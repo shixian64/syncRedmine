@@ -65,6 +65,7 @@ class WorkloadDialog(AnimatedDialog):
         self._activities = []
         self._pm_user_id = None
         self._sub_module_loader = None
+        self._common_projects = []
         self._setup_mode = not self._has_pm_config()
 
         self.setWindowTitle("syncRedmine — 每日工时提交")
@@ -404,6 +405,14 @@ class WorkloadDialog(AnimatedDialog):
         self._project_block = self._field_block("开发项目", self.combo_project)
         form_layout.addWidget(self._project_block)
 
+        # common 项目（仅 type=2 时显示）
+        self.combo_common_project = QComboBox()
+        self.combo_common_project.setFixedHeight(44)
+        self.combo_common_project.setEnabled(False)
+        self.combo_common_project.addItem("加载中...", None)
+        self._common_project_block = self._field_block("Common 项目", self.combo_common_project)
+        form_layout.addWidget(self._common_project_block)
+
         # 业务部门（下拉框，与 PM 系统选项一致）
         row_dept = QHBoxLayout()
         row_dept.setSpacing(12)
@@ -522,7 +531,8 @@ class WorkloadDialog(AnimatedDialog):
 
         # 收集所有表单字段，用于初始禁用/启用控制
         self._form_fields = [
-            self.combo_project, self.combo_department, self.combo_npi,
+            self.combo_project, self.combo_common_project,
+            self.combo_department, self.combo_npi,
             self.combo_product, self.combo_module, self.combo_submodule,
             self.edit_content, self.edit_hours, self.edit_remark,
             self.combo_inspector,
@@ -534,6 +544,7 @@ class WorkloadDialog(AnimatedDialog):
         else:
             self._set_form_enabled(False)
             self._project_block.hide()
+            self._common_project_block.hide()
             self._npi_block.hide()
             self._product_block.hide()
 
@@ -546,12 +557,14 @@ class WorkloadDialog(AnimatedDialog):
         """任务类别切换时控制字段可见性和锁定状态。"""
         type_id = self._get_workload_type()
         is_develop = (type_id == '1')
+        is_common = (type_id == '2')
 
         # 启用所有字段
         self._set_form_enabled(True)
 
         # 开发项目相关字段的可见性
         self._project_block.setVisible(is_develop)
+        self._common_project_block.setVisible(is_common)
         self._npi_block.setVisible(is_develop)
         self._product_block.setVisible(is_develop)
 
@@ -569,6 +582,8 @@ class WorkloadDialog(AnimatedDialog):
             self.combo_npi.setEnabled(False)
         if self.combo_inspector.count() == 1 and self.combo_inspector.itemData(0) is None:
             self.combo_inspector.setEnabled(False)
+        if self.combo_common_project.count() == 1 and self.combo_common_project.itemData(0) is None:
+            self.combo_common_project.setEnabled(False)
 
     def _get_workload_type(self):
         checked = self._type_group.checkedId()
@@ -730,6 +745,26 @@ class WorkloadDialog(AnimatedDialog):
         if proj_idx >= 0:
             self._on_project_changed(proj_idx)
 
+        # common 项目列表
+        self._common_projects = data.get('common_projects') or []
+        self.combo_common_project.blockSignals(True)
+        self.combo_common_project.clear()
+        default_common_id = defaults.get('commonProjectId')
+        default_common_name = defaults.get('outerProjectCategory', '')
+        common_idx = 0
+        self.combo_common_project.addItem("请选择 common 项目", None)
+        for i, proj in enumerate(self._common_projects):
+            pid = proj.get('commonProjectId')
+            name = proj.get('commonProjectName') or proj.get('commonProjectDescription') or str(pid)
+            self.combo_common_project.addItem(name, pid)
+            if default_common_id and str(pid) == str(default_common_id):
+                common_idx = i + 1
+            elif default_common_name and name == default_common_name:
+                common_idx = i + 1
+        self.combo_common_project.setCurrentIndex(common_idx)
+        self.combo_common_project.setEnabled(bool(self._common_projects))
+        self.combo_common_project.blockSignals(False)
+
         # 模块（与网页一致：只有1个时自动选，否则不预选）
         modules = data.get('modules') or []
         self.combo_module.blockSignals(True)
@@ -800,7 +835,8 @@ class WorkloadDialog(AnimatedDialog):
         self.combo_inspector.setEnabled(True)
         self.combo_inspector.blockSignals(False)
 
-        logger.info("工时下拉选项加载完成: modules=%d npi=%d forms=%d persons=%d",
+        logger.info("工时下拉选项加载完成: dev_projects=%d common_projects=%d modules=%d npi=%d forms=%d persons=%d",
+                     len(self._dev_projects), len(self._common_projects),
                      len(modules), len(npi_nodes), len(forms), len(persons))
 
         # 重新应用任务类别的锁定规则
@@ -811,7 +847,11 @@ class WorkloadDialog(AnimatedDialog):
 
     def _on_dropdowns_error(self, msg):
         self._set_status(f"下拉选项加载失败: {msg}", state='error')
-        for combo in (self.combo_module, self.combo_npi, self.combo_product, self.combo_inspector):
+        for combo in (
+            self.combo_common_project,
+            self.combo_module, self.combo_npi,
+            self.combo_product, self.combo_inspector,
+        ):
             combo.clear()
             combo.addItem("加载失败", None)
 
@@ -897,6 +937,11 @@ class WorkloadDialog(AnimatedDialog):
             hours = 7
 
         wl_type = self._get_workload_type()
+        common_project_id = self.combo_common_project.currentData()
+        common_project_name = (
+            self.combo_common_project.currentText().strip()
+            if common_project_id is not None else ''
+        )
 
         # 任务日期
         qdate = self.date_edit.date()
@@ -905,9 +950,9 @@ class WorkloadDialog(AnimatedDialog):
         payload = {
             'workloadType': wl_type,
             'preResearchProjectId': '',
-            'commonProjectId': '',
+            'commonProjectId': str(common_project_id) if wl_type == '2' and common_project_id is not None else '',
             'projectCategory': self.combo_project.currentText().strip() if wl_type == '1' else '',
-            'outerProjectCategory': '',
+            'outerProjectCategory': common_project_name if wl_type == '2' else '',
             'businessDepartment': self.combo_department.currentData() or '',
             'workloadNpiNode': (self.combo_npi.currentData() or self.combo_npi.currentText()) if wl_type == '1' else '',
             'productForm': (self.combo_product.currentData() or self.combo_product.currentText()) if wl_type == '1' else '',
@@ -929,6 +974,13 @@ class WorkloadDialog(AnimatedDialog):
         if self._type_group.checkedId() < 0:
             QMessageBox.warning(self, "提示", "请先选择任务类别。")
             return
+        wl_type = self._get_workload_type()
+        if wl_type == '1' and not self.combo_project.currentText().strip():
+            QMessageBox.warning(self, "提示", "请选择开发项目。")
+            return
+        if wl_type == '2' and self.combo_common_project.currentData() is None:
+            QMessageBox.warning(self, "提示", "请选择 common 项目。")
+            return
         content = self.edit_content.toPlainText().strip()
         if not content:
             QMessageBox.warning(self, "提示", "具体工作内容不能为空。")
@@ -941,8 +993,13 @@ class WorkloadDialog(AnimatedDialog):
         self._set_status("提交中...", state='running')
 
         payload = self._collect_payload()
+        project_name = (
+            payload.get('projectCategory')
+            or payload.get('outerProjectCategory')
+            or payload.get('commonProjectId')
+        )
         logger.info("提交工时: type=%s project=%s module=%s hours=%s",
-                     payload.get('workloadType'), payload.get('projectCategory'),
+                     payload.get('workloadType'), project_name,
                      payload.get('workModuleId'), payload.get('workHour'))
 
         self._submit_worker = WorkloadSubmitWorker(
@@ -960,6 +1017,11 @@ class WorkloadDialog(AnimatedDialog):
         self.config['workload_defaults'] = {
             'workloadType': self._get_workload_type(),
             'projectCategory': self.combo_project.currentText().strip(),
+            'commonProjectId': str(self.combo_common_project.currentData() or ''),
+            'outerProjectCategory': (
+                self.combo_common_project.currentText().strip()
+                if self.combo_common_project.currentData() is not None else ''
+            ),
             'businessDepartment': self.combo_department.currentData() or '',
             'workModuleId': str(self.combo_module.currentData() or ''),
             'workSubModuleId': str(self.combo_submodule.currentData() or ''),

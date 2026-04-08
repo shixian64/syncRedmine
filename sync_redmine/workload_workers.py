@@ -6,7 +6,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from .constants import logger
 from .workload_api import (
     PMSession,
-    fetch_development_projects,
+    fetch_development_projects, fetch_common_projects,
     fetch_work_modules, fetch_work_sub_modules_by_module,
     fetch_npi_nodes, fetch_product_forms, fetch_check_persons,
     fetch_history_records,
@@ -42,6 +42,12 @@ class WorkloadDropdownLoader(QThread):
             except Exception:
                 logger.debug("fetch_development_projects 失败，回退到历史记录")
 
+            common_projects = []
+            try:
+                common_projects = fetch_common_projects(session)
+            except Exception:
+                logger.debug("fetch_common_projects 失败")
+
             modules = fetch_work_modules(session, user_id)
             npi_nodes = fetch_npi_nodes(session)
             product_forms = fetch_product_forms(session)
@@ -52,6 +58,7 @@ class WorkloadDropdownLoader(QThread):
 
             self.loaded_sig.emit({
                 'dev_projects': dev_projects,
+                'common_projects': common_projects,
                 'modules': modules,
                 'npi_nodes': npi_nodes,
                 'product_forms': product_forms,
